@@ -1,0 +1,4 @@
+interface:
+  display_name: "通用爆款素材模型"
+  short_description: "跨题材提炼图片与视频的创意基因，并据此生成原创文案"
+  default_prompt: "使用 $viral-media-copywriter 分析这个素材文件夹，提炼跨样本创意机制，并生成可追溯的原创文案方案。"

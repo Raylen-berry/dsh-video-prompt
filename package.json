@@ -1,0 +1,53 @@
+{
+  "name": "dsh-video-prompt",
+  "version": "0.1.0",
+  "description": "视频/图片提示词流水线：对话框旁的图片、视频提示词模式入口（扫描媒体文件夹、分流图片与视频、逐个产出可复制的生成提示词），并注册 video-prompt-pipeline 技能包。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "video",
+    "prompt",
+    "image",
+    "video-prompt-pipeline"
+  ],
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "skills",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.2-alpha.1",
+    "react": "^18.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Raylen-berry/dsh-video-prompt.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Raylen-berry/dsh-video-prompt/issues"
+  },
+  "homepage": "https://github.com/Raylen-berry/dsh-video-prompt#readme",
+  "license": "MIT"
+}

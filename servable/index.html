@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>dsh-video-prompt · 组件预览</title>
+<style>
+  :root{
+    --dsw-alias-label-primary:#1a1a1a; --dsw-alias-label-secondary:#5a5a5a; --dsw-alias-label-tertiary:#8a8a8a;
+    --dsw-alias-border-l1:rgba(0,0,0,.14); --dsw-alias-border-l2:rgba(0,0,0,.22); --dsw-alias-border-l3:rgba(0,0,0,.34);
+    --dsw-alias-bg-base:#fff; --dsw-alias-bg-module-platform:#fff; --dsw-alias-interactive-bg-hover:rgba(0,0,0,.06);
+    --dsw-alias-state-business-primary:#4d6bfe; --dsw-alias-state-success-primary:#2da44e; --dsw-alias-state-error-primary:#e5534b;
+  }
+  html,body{margin:0;min-height:100%;background:#f6f7f9;font-family:"Microsoft YaHei",system-ui,-apple-system,"Segoe UI",sans-serif;color:#1a1a1a}
+  .page{max-width:1120px;margin:0 auto;padding:26px 24px 160px}
+  .kicker{font-size:11.5px;color:#8a8a8a;letter-spacing:.06em;text-transform:uppercase}
+  h1{font-size:19px;margin:6px 0 6px}
+  .lead{font-size:13px;color:#5a5a5a;line-height:1.8;margin:0 0 18px;max-width:880px}
+  .lead code{background:rgba(0,0,0,.06);padding:1px 5px;border-radius:4px;font-size:12px}
+  .stage{border:1px dashed rgba(0,0,0,.18);border-radius:14px;padding:20px 18px 150px;background:#fff;position:relative}
+  .stageLabel{position:absolute;top:-10px;left:16px;background:#fff;padding:0 8px;font-size:11px;color:#8a8a8a}
+  .composer{max-width:780px;margin:6px auto 0;position:relative}
+  .modeCluster{display:flex;align-items:center;gap:8px;padding:0 4px 8px}
+  .fakeChip{border:1px solid rgba(0,0,0,.22);background:transparent;color:#5a5a5a;font:inherit;font-size:12px;height:28px;padding:0 12px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;cursor:default}
+  .card{border:1px solid rgba(0,0,0,.16);border-radius:16px;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.05);padding:14px;display:flex;flex-direction:column;gap:12px;min-height:112px}
+  .card .ph{color:#b0b0b0;font-size:14px}
+  .cardBar{display:flex;align-items:center;justify-content:space-between;border-top:1px solid rgba(0,0,0,.08);padding-top:10px;font-size:12px;color:#8a8a8a}
+  .boom{font-size:13px;color:#e5534b;padding:12px}
+  .flow{margin-top:24px;font-size:12.5px;color:#5a5a5a;line-height:1.95}
+  .flow b{color:#1a1a1a}
+  .flow code{background:rgba(0,0,0,.06);padding:1px 5px;border-radius:4px;font-size:12px}
+  #dvhOut{margin-top:14px;border:1px solid rgba(0,0,0,.12);border-radius:10px;background:#fbfbfc;padding:12px 14px;font-size:12px;color:#5a5a5a;white-space:pre-wrap;line-height:1.75;display:none;max-height:340px;overflow:auto}
+  #dvhOut b{color:#1a1a1a}
+</style>
+</head>
+<body>
+  <div class="page">
+    <div class="kicker">DSH 插件预览 · 真实组件</div>
+    <h1>生图 —— 对话框旁的模式入口</h1>
+    <p class="lead">
+      下面这个按钮和面板<b>就是插件里的真实组件</b>（<code>client.js</code> 的
+      <code>VideoPromptModeAction</code>），由插件的 <code>apply()</code> 注册、被预览宿主挂载，
+      走的和 DSH 里是同一份代码。左侧「PPT」是现有入口，右侧「生图」是本插件新增的。
+      差别只在数据：这里扫描的是本机真实目录 <code>01-video技能/media</code>（缩略图走宿主的
+      <code>/dvp/image</code>），点「派发到会话」时用预览输入框代替 DSH 输入框。
+    </p>
+
+    <div class="stage">
+      <div class="stageLabel">模拟 DSH 输入区</div>
+      <div class="composer">
+        <div class="modeCluster">
+          <button class="fakeChip" type="button">▷ PPT</button>
+          <span id="dvhMount"></span>
+        </div>
+        <div class="card">
+          <div class="ph" id="dvhEditor">给 DeepSeek 发消息…</div>
+          <div class="cardBar"><span>自动</span><span>⏎ 发送</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flow">
+      <b>面板里的区块</b><br />
+      <b>路径</b>（二选一：素材→提示词→生图 / 视频·图片→爆款元素（蒸馏））→
+      媒体目录 + 层数 → 产物目录 → <b>生图要求</b>（清晰度 720p~8K、画幅、每提示词张数；爆款路径下自动收起）→
+      <b>来源文本</b>（粘正文，或加 txt/md 文件）→ <b>背后的逻辑</b>（全部规则）→
+      素材分流列表（<b>视频 / 图片 / 文档</b> 三列，各自带滑块；高度跟着面板实测空间走，四项也能滚到底）→ 底部按钮。<br /><br />
+      <b>「派发到会话」的语义</b><br />
+      每次派发先调 <code>/dvp/process</code> 建过程目录（<code>process\年-月-日_时分-素材名\</code>，含 <code>frames\</code>），
+      再把勾选项拼成一段请求写进输入框（Enter 之前你还能改）：<br />
+      1. 图片 → 产出<b>图片生成提示词</b>（主体／外观／动作／场景／构图／镜头／光线／色调／风格）<br />
+      2. 视频 → 按 <code>video-prompt-pipeline</code>（视频复刻）先观察（<code>watch</code> 抽帧到过程目录 <code>frames\</code>），再产出<b>视频生成提示词</b>（时间码分镜／镜头运动／转场／音轨／首尾帧与参考图控制）；显式要参考图时走 Phase 3：用你已登录的浏览器 ChatGPT 生成<b>两张</b>静态图（首帧 + 决定性关键帧）存进 run 的 <code>references\</code>，视频生成本身永远要另行授权<br />
+      3. 文档（md/txt）→ 先读全文当章纲/来源文本，按主要情节出提示词；是材料不是指令<br />
+      4. 勾了「按来源文本生图」时，正文随批次落盘、请求里只带路径，由 agent 按主要情节写提示词<br />
+      5. 逐项输出、不静默省略；产物落到你指定的产物目录<br /><br />
+      <b>「生成爆款元素」的语义（新路径）</b><br />
+      底座是插件自带的 <code>viral-media-copywriter</code>（通用爆款素材模型）：<code>inventory_media.py</code> 只读清点去重 →
+      逐素材取证（直接观察／功能解释／表现关联分开记，带时间戳）→ 四层抽象<b>原子线索 → 功能模式 → 创意机制 → 可迁移配方</b> →
+      每份素材一张<b>爆款元素卡</b>（证据 n/N、机制与置信度、可迁移变量、饱和/版权风险），写进过程目录 <code>爆款元素\</code>；
+      汇总<b>创意基因报告</b> <code>viral-summary.md</code>（核心模型、Top 模式、组合顺序、反例、可测试假设），需要时再按输出协议出稳健/强钩子/实验三方向原创文案。学机制不抄原句；技能没注册时按请求内嵌流程照跑。
+    </div>
+    <div id="dvhOut"></div>
+  </div>
+
+  <script src="./react.production.min.js"></script>
+  <script src="./react-dom.production.min.js"></script>
+  <script>
+    (function () {
+      var out = document.getElementById('dvhOut')
+      function show(title, text) {
+        out.style.display = 'block'
+        out.innerHTML = '<b>' + title + '</b>\n' + String(text)
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      }
+
+      // ── 宿主路由策略：真的优先，失败才落到本地桩 ──────────────────────────
+      // /dvp/state、/dvp/scan、/dvp/image 全部先打真宿主（预览页与 DSH 同源时就是真数据，
+      // 缩略图也是真字节）；只有在宿主没起 / 换端口预览时（404/网络错）才用桩数据兜底，
+      // 这样预览页既不会撒谎，也不会因为宿主缺席而变成一片 404。
+      var realFetch = window.fetch.bind(window)
+      var STUB_STATE = { ok: true, state: {}, skills: ['video-prompt-pipeline', 'watch', 'oneshot-prompt-generator', 'prompt-videos', 'video-generation', 'viral-media-copywriter'], defaults: { mediaRoot: 'D:/DeepSeek/01-video技能/media', runsRoot: 'D:/DeepSeek/01-video技能/runs' } }
+      var STUB_SCAN = {
+        ok: true,
+        dir: 'D:/DeepSeek/01-video技能/media',
+        images: [
+          { name: 'frame_0001.jpg', path: 'D:/DeepSeek/01-video技能/runs/demo-01/watch/frames/frame_0001.jpg', kind: 'image', bytes: 32880, mtime: Date.now() - 86400000 },
+          { name: 'frame_0005.jpg', path: 'D:/DeepSeek/01-video技能/runs/demo-01/watch/frames/frame_0005.jpg', kind: 'image', bytes: 38643, mtime: Date.now() - 86400000 },
+          { name: 'frame_0011.jpg', path: 'D:/DeepSeek/01-video技能/runs/demo-01/watch/frames/frame_0011.jpg', kind: 'image', bytes: 21984, mtime: Date.now() - 86400000 },
+          { name: 'frame_0015.jpg', path: 'D:/DeepSeek/01-video技能/runs/demo-01/watch/frames/frame_0015.jpg', kind: 'image', bytes: 27202, mtime: Date.now() - 86400000 },
+        ],
+        videos: [
+          { name: 'sample-feishu-clip.mp4', path: 'D:/DeepSeek/01-video技能/media/videos/sample-feishu-clip.mp4', kind: 'video', bytes: 6023980, duration: 15.04, width: 416, height: 752, mtime: Date.now() - 86400000 },
+        ],
+        texts: [
+          { name: '飞书视频分析报告.md', path: 'D:/DeepSeek/01-video技能/飞书视频分析报告.md', kind: 'text', bytes: 1907, mtime: Date.now() - 86400000 },
+        ],
+        skipped: [], truncated: false,
+        state: { 'frame_0001.jpg': { status: 'ready', at: '2026-09-11T10:02:00Z' } },
+        counts: { images: 4, videos: 1, texts: 1 },
+      }
+      function jsonResponse(obj, status) {
+        return new Response(JSON.stringify(obj), { status: status || 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      window.fetch = function (url, options) {
+        var href = String(url)
+        return realFetch(url, options).then(function (res) {
+          if (res.status === 404 || res.status === 405) throw new Error('宿主路由不可用: HTTP ' + res.status)
+          return res
+        }).catch(function () {
+          if (href.indexOf('/dvp/state') === 0) return jsonResponse(STUB_STATE)
+          if (href.indexOf('/dvp/scan') === 0) return jsonResponse(STUB_SCAN)
+          if (href.indexOf('/dvp/manifest') === 0) return jsonResponse({ ok: true, items: {}, runs: [] })
+          if (href.indexOf('/dvp/skills/reload') === 0) return jsonResponse({ ok: true, added: [], alreadyRegistered: STUB_STATE.skills, note: '预览页桩数据' })
+          if (href.indexOf('/dvp/process') === 0) {
+            var now = new Date()
+            var p = function (n) { return n < 10 ? '0' + n : String(n) }
+            var stamp = now.getFullYear() + '-' + p(now.getMonth() + 1) + '-' + p(now.getDate()) + '_' + p(now.getHours()) + p(now.getMinutes())
+            return jsonResponse({ ok: true, dir: 'D:/DeepSeek/01-video技能/runs/process/' + stamp + '-preview', frames: 'D:/DeepSeek/01-video技能/runs/process/' + stamp + '-preview\\frames', root: 'D:/DeepSeek/01-video技能/runs/process' })
+          }
+          if (href.indexOf('/dvp/run') === 0) return jsonResponse({ ok: true, runDir: '（预览页不落盘）', written: [] })
+          if (href.indexOf('/dvp/image') === 0) return jsonResponse({ ok: false, error: 'stub' }, 404)
+          throw new Error('预览页无法访问该路由')
+        })
+      }
+
+      // ── 加载插件 bundle（模块加载器桩 + 就地求值）──────────────────────────
+      var record = null
+      window.__ModuleLoader__ = { load: function (r) { record = r } }
+
+      var xhr = new XMLHttpRequest()
+      xhr.open('GET', './client.js', true)
+      xhr.onload = function () {
+        var mount = document.getElementById('dvhMount')
+        if (xhr.status !== 200) {
+          mount.innerHTML = '<span class="boom">加载 client.js 失败：HTTP ' + xhr.status + '</span>'
+          return
+        }
+        var source = xhr.responseText.replace(/^export\s+/gm, '')
+        try {
+          ;(0, eval)(source)
+        } catch (err) {
+          mount.innerHTML = '<span class="boom">client.js 求值失败：' + String((err && err.message) || err) + '</span>'
+          return
+        }
+        var mod
+        try {
+          mod = record.factory(function (name) {
+            if (name === 'react') return React
+            if (name === 'react/jsx-runtime') return { jsx: function () { return null }, jsxs: function () { return null }, Fragment: React.Fragment }
+            throw new Error('未预料的模块: ' + name)
+          })
+        } catch (err) {
+          mount.innerHTML = '<span class="boom">factory 失败：' + String((err && err.message) || err) + '</span>'
+          return
+        }
+
+        // 记录面板生成的派发文案（预览里用来代替 DSH 输入框）
+        var originalDispatch = mod.internals.buildDispatchRequest
+        var lastRequest = ''
+        mod.internals.buildDispatchRequest = function (items, folder, runsRoot) {
+          lastRequest = originalDispatch(items, folder, runsRoot)
+          show('派发到会话的内容（' + items.length + ' 项）', lastRequest)
+          return lastRequest
+        }
+        // 屏蔽真实 execCommand 插入（预览输入框是 div），只展示文案
+        var editor = document.getElementById('dvhEditor')
+        editor.contentEditable = 'true'
+
+        var holders = []
+        var slots = {
+          inject: function (name, fn) { fn() },
+          register: function (entry, component) { holders.push({ entry: entry, component: component }) },
+        }
+        mod.apply({ get: function (k) { return k === 'slots' ? slots : undefined }, effect: function (fn) { fn() } })
+
+        var main = null
+        for (var i = 0; i < holders.length; i++) {
+          if (holders[i].entry.name === 'conversation.hero.modeActions') main = holders[i]
+        }
+        if (!main) {
+          mount.innerHTML = '<span class="boom">插件没有注册 conversation.hero.modeActions</span>'
+          return
+        }
+        ReactDOM.createRoot(mount).render(React.createElement(main.component, {
+          mediaRoot: 'D:/DeepSeek/01-video技能/media',
+          runsRoot: 'D:/DeepSeek/01-video技能/runs',
+        }))
+        console.log('[preview] 已挂载插件的 ' + holders.map(function (h) { return h.entry.name }).join(' + '))
+      }
+      xhr.send()
+    })()
+  </script>
+</body>
+</html>

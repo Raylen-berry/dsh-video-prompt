@@ -1,0 +1,26 @@
+# ============================================================================
+# dsh-video-prompt — DSH bundle patch
+# ============================================================================
+# 宿主行：随 bundle 层栈插入 Web profile。宿主半边负责
+#   ① /dvp/* HTTP 路由（媒体目录扫描、单文件读取、状态回写、图片预览）
+#   ② 把本包 skills/ 下的技能包注册进 ctx.skills 全局层
+#      （video-prompt-pipeline / watch / oneshot-prompt-generator /
+#        prompt-videos / video-generation）
+# 客户端半边是 /plugins/dsh-video-prompt/client.js，注册对话框旁的模式按钮。
+#
+# 安装（DSH 关闭时在终端执行，或在 DSH 里让助手执行）：
+#   dsh plugin --profile web add link:D:/DeepSeek/dsh-plugins/dsh-video-prompt
+# 装完重启一次桌面端（宿主行 + 新客户端 bundle 需要重新扫描）。
+# 之后：技能立即出现在技能目录；面板改配置只需刷新页面，不用再重启。
+# ============================================================================
+
+- insert:
+    - id: video-prompt
+      name: dsh-video-prompt
+      config:
+        # 媒体默认根目录：面板首次打开时定位到这里。留空则用工作区根。
+        mediaRoot: 'D:/DeepSeek/01-video技能/media'
+        # 运行产物目录（inverse-prompt / optimized-prompt / generation.json）。
+        runsRoot: 'D:/DeepSeek/01-video技能/runs'
+        # 是否把本包 skills/ 注册进全局技能目录。
+        registerSkills: true
