@@ -170,14 +170,24 @@
 ## 安装（已经装好，这里是复现方式）
 
 ```bash
-# DSH 关闭时，或让 DSH 里的 agent 执行：
-node "<DSH 安装目录>/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --profile web add "link:D:/DeepSeek/dsh-plugins/dsh-video-prompt"
+# DSH 关闭时，或让 DSH 里的 agent 执行（<本包目录> = 你自己放这个包的位置）：
+node "<DSH 安装目录>/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --profile web add "link:<本包目录>/dsh-video-prompt"
 ```
 
 安装器会：把 link 写进 `$DSH_HOME/profiles/web/package.json` 的 `dependencies`，
 把 `dsh-video-prompt` 追加进 `dsh.profile.bundles`（作为组合最后一层），并在 `profiles/web/node_modules` 建 junction。
 **装完必须重启一次桌面端**：新增 bundle 要重新扫描才会挂载，重启后客户端 bundle 才会进
 `window.__DSH_BOOT__`、`/dvp/*` 路由才会起来。
+
+### 媒体目录（每台机器不一样，本包不预设任何绝对路径）
+
+| 层次 | 位置 | 说明 |
+| --- | --- | --- |
+| 默认 | `$DSH_HOME/dsh-video-prompt/media`、`.../runs` | 什么都不配时的落点，随机器走 |
+| 面板 | 面板里填的路径 → `$DSH_HOME/dsh-video-prompt/state.json` | 优先级最高，改完刷新页面即可 |
+| profile 层 | `$DSH_HOME/profiles/web/cordis.patch.yml` 里 `- id: video-prompt` 的 `config` | 多机各一份；`config` 整块替换，覆盖时把 `registerSkills` 一起写上 |
+
+三种写法都支持 `~`、`$DSH_HOME`、`%DSH_HOME%` 展开。
 
 ## 使用
 

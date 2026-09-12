@@ -72,9 +72,14 @@ const MAX_SOURCE_BYTES = 4 * 1024 * 1024
 const MAX_IMAGE_BYTES = 24 * 1024 * 1024
 const MAX_SCAN_ENTRIES = 4000
 
+// 默认值刻意**不绑定任何设备**：留空即落到本机 DSH 数据目录下的媒体/产物目录
+// （$DSH_HOME/dsh-video-prompt/media 与 .../runs）。要指向自己的素材盘有两个途径：
+//   ① 面板里改 —— 写进 $DSH_HOME/dsh-video-prompt/state.json，优先于 config；
+//   ② profile 的 cordis.patch.yml 里按 id 覆盖 config —— 每台机器一份，不进本包。
+// 因此本包任何地方都不该出现某个人的盘符路径。
 const DEFAULTS = Object.freeze({
-  mediaRoot: 'D:/DeepSeek/01-video技能/media',
-  runsRoot: 'D:/DeepSeek/01-video技能/runs',
+  mediaRoot: '',
+  runsRoot: '',
   registerSkills: true,
 })
 
@@ -92,15 +97,28 @@ function stateFile() {
   return path.join(stateDir(), 'state.json')
 }
 
+/** 展开用户输入里的 ~ 与 $DSH_HOME / %DSH_HOME%；空串（或非字符串）返回空串。 */
+function expandRoot(value) {
+  if (typeof value !== 'string') return ''
+  let text = value.trim()
+  if (text === '') return ''
+  const home = process.env.USERPROFILE || process.env.HOME || ''
+  if (text === '~') text = home
+  else if (text.startsWith('~/') || text.startsWith('~\\')) text = path.join(home, text.slice(2))
+  return text.replace(/\$\{?DSH_HOME\}?/gi, dshHome()).replace(/%DSH_HOME%/gi, dshHome())
+}
+
+/** 配置里留空的根 → 本机数据目录；非空 → 展开 ~/$DSH_HOME 后取绝对路径。 */
+function resolveRoot(value, fallback) {
+  const expanded = expandRoot(value)
+  return path.resolve(expanded !== '' ? expanded : fallback)
+}
+
 function normalizeConfig(raw) {
   const config = { ...DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) }
   const out = {
-    mediaRoot: typeof config.mediaRoot === 'string' && config.mediaRoot.trim() !== ''
-      ? path.resolve(config.mediaRoot)
-      : path.resolve(process.cwd()),
-    runsRoot: typeof config.runsRoot === 'string' && config.runsRoot.trim() !== ''
-      ? path.resolve(config.runsRoot)
-      : path.join(path.resolve(process.cwd()), 'video-prompt-runs'),
+    mediaRoot: resolveRoot(config.mediaRoot, path.join(stateDir(), 'media')),
+    runsRoot: resolveRoot(config.runsRoot, path.join(stateDir(), 'runs')),
     registerSkills: config.registerSkills !== false,
   }
   return out
@@ -685,8 +703,8 @@ export async function apply(ctx, rawConfig = {}) {
           const grokOptions = sanitizeGrokOptions(patch.grokOptions)
           const pipelineMode = sanitizePipelineMode(patch.pipelineMode)
           const next = await writeState({
-            mediaRoot: typeof patch.mediaRoot === 'string' ? path.resolve(patch.mediaRoot) : undefined,
-            runsRoot: typeof patch.runsRoot === 'string' ? path.resolve(patch.runsRoot) : undefined,
+            mediaRoot: typeof patch.mediaRoot === 'string' ? resolveRoot(patch.mediaRoot, path.join(stateDir(), 'media')) : undefined,
+            runsRoot: typeof patch.runsRoot === 'string' ? resolveRoot(patch.runsRoot, path.join(stateDir(), 'runs')) : undefined,
             ...(grokOptions === undefined ? {} : { grokOptions }),
             ...(pipelineMode === undefined ? {} : { pipelineMode }),
           })

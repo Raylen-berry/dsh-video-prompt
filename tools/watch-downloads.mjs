@@ -83,7 +83,7 @@ function targetName(entries, index, ext, usedNames) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
-  const outDir = path.resolve(args.out || 'D:/DeepSeek/01-video技能/media/grok-output')
+  const outDir = path.resolve(args.out || path.join(process.env.DVP_MEDIA_ROOT || 'media', 'grok-output'))
   const srcDir = path.resolve(args.src || path.join(os.homedir(), 'Downloads'))
   const deadline = Date.now() + args.minutes * 60 * 1000
 

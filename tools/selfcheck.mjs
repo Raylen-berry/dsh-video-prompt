@@ -21,7 +21,12 @@ import { pathToFileURL } from 'node:url'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
 const PKG = path.resolve(HERE, '..')
-const APP = 'D:/deepseek-harness/DSH Desktop/resources/app'
+// DSH 安装目录：优先 DSH_APP_DIR；否则从当前 node 可执行文件反推
+// （<app>/node_modules/node/bin/node.exe ⇒ 上三级就是 <app>）。不写死任何人的安装路径。
+const APP = process.env.DSH_APP_DIR || path.resolve(path.dirname(process.execPath), '..', '..', '..')
+// 真实产物回归用的样本根：按本机环境变量给，没配就退到相对目录，对应回归自动跳过。
+const SAMPLE_MEDIA = path.resolve(process.env.DVP_MEDIA_ROOT || 'media')
+const SAMPLE_RUNS = path.resolve(process.env.DVP_RUNS_ROOT || 'runs')
 const require2 = createRequire(path.join(APP, 'package.json'))
 
 let failures = 0
@@ -567,8 +572,8 @@ ok('扩展名按 content-type 推断', shot.extFromContentType('image/webp') ===
 
 // 真实产物回归：demo-01 的图片提示词文档里有文档标题、风格锚点、正文外说明三种伪块，
 // 正确的切分结果应当**恰好 4 条**（对应视频的四个镜头）。
-const realDoc = 'D:/DeepSeek/01-video技能/runs/demo-01/optimized-image-prompt.md'
-const planFile = 'D:/DeepSeek/01-video技能/media/grok-output/plan.json'
+const realDoc = path.join(SAMPLE_RUNS, 'demo-01', 'optimized-image-prompt.md')
+const planFile = path.join(SAMPLE_MEDIA, 'grok-output', 'plan.json')
 if (existsSync(realDoc)) {
   const realParsed = shot.splitPrompts(readFileSync(realDoc, 'utf8'))
   ok('真实文档切出恰好 4 条', realParsed.length === 4, realParsed.map((p) => p.slug))
@@ -642,7 +647,7 @@ ok('缺尾签名的残片被判为不完整', cache.identifyImage(headOnly) && c
 ok('非图片字节返回 null', cache.identifyImage(Buffer.from('not an image at all')) === null)
 
 // 真实产出回归：已落盘的那张成图必须是合法 JPEG，且体积与页面内读到的 259316 一致
-const shotFile = 'D:/DeepSeek/01-video技能/media/grok-output/01-01-门廊按铃.jpg'
+const shotFile = path.join(SAMPLE_MEDIA, 'grok-output', '01-01-门廊按铃.jpg')
 if (existsSync(shotFile)) {
   const shotBytes = readFileSync(shotFile)
   const kind = cache.identifyImage(shotBytes)

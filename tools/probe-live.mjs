@@ -12,8 +12,10 @@ import { createServer } from 'node:http'
 import { pathToFileURL } from 'node:url'
 
 const PKG = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
-const MEDIA = 'D:/DeepSeek/01-video技能/media'
-const RUNS = 'D:/DeepSeek/01-video技能/runs'
+// 媒体/产物根：优先环境变量（DVP_MEDIA_ROOT / DVP_RUNS_ROOT），其次命令行参数，
+// 最后落到相对路径 —— 本包不预设任何人的盘符。
+const MEDIA = path.resolve(process.env.DVP_MEDIA_ROOT || process.argv[2] || 'media')
+const RUNS = path.resolve(process.env.DVP_RUNS_ROOT || process.argv[3] || 'runs')
 
 let checks = 0
 let failures = 0
