@@ -317,7 +317,11 @@ ok('每个选项都渲染成 option', (panelHtml.match(/<option/g) || []).length
 ok('有扫描层数下拉（默认 4 层）', panelHtml.includes('层数') && panelHtml.includes('只看这一层') && panelHtml.includes('8 层'))
 // 路径二选一（默认落在主线 prompt 上）
 ok('有「路径」下拉且默认是主线', panelHtml.includes('路径') && panelHtml.includes('素材 → 提示词 → 生图') && panelHtml.includes('爆款元素'))
-ok('默认态主按钮是「派发到会话」', panelHtml.includes('派发到会话') && !panelHtml.includes('生成爆款元素'))
+ok('默认态主按钮是「准备生图请求」', panelHtml.includes('准备生图请求') && !panelHtml.includes('准备分析请求'))
+// v0.2.0（用户 2026-09-14 反馈）：主按钮只说它真正做的事 —— 把请求写进输入框、按 Enter 才开跑；
+// 面板底部另有独立的「清空草稿」入口（收起/关闭面板一律保留草稿，不再需要关闭确认框）。
+ok('主按钮不再叫「派发到会话 / 生成爆款元素」', !panelHtml.includes('派发到会话') && !panelHtml.includes('生成爆款元素'))
+ok('底部有「清空草稿」入口', panelHtml.includes('清空草稿'))
 // 素材分流三列：视频 / 图片 / 文档（用户报"识别不了 md"）
 ok('素材列表是视频/图片/文档三列', panelHtml.includes('dvp-cols') && (panelHtml.match(/dvp-col"/g) || []).length === 3, (panelHtml.match(/dvp-col"/g) || []).length)
 ok('文档列有独立的空态说明', panelHtml.includes('md / txt / srt'))
@@ -707,6 +711,36 @@ if (existsSync(shotFile)) {
   ok('成图体积与页面内读到的一致（259316）', shotBytes.length === 259316, shotBytes.length)
 } else {
   console.log('  · 跳过成图回归（' + shotFile + ' 不存在）')
+}
+
+// ── 面板草稿（v0.2.0）：收起/关掉面板不该丢用户输入 ──────────────────────────
+// 起因（用户 2026-09-14 反馈）：点面板外面或按 Esc 会卸载整个面板，正文、素材勾选、
+// 本地挑选的文件全清零。现在这三样记在模块级内存草稿里，这里断言草稿的读写/清空语义。
+console.log('\n— 面板草稿（内存，不写磁盘）—')
+{
+  const it = exportsObj.internals
+  it.draftClear()
+  ok('初始没有草稿', it.draftGet() === null)
+  ok('空草稿不值得恢复（否则会顶掉"刚打开就扫一次"）', it.draftWorthRestoring() === false)
+  it.draftPatch({ sourceText: '第一章 正文', selected: { 'D:/m/a.png': false }, localFiles: null, data: null })
+  ok('draftPatch 写入后可读回', it.draftGet().sourceText === '第一章 正文' && it.draftGet().selected['D:/m/a.png'] === false)
+  it.draftPatch({ data: { dir: 'D:/m' } })
+  ok('draftPatch 是合并而不是覆盖（正文还在）', it.draftGet().sourceText === '第一章 正文' && it.draftGet().data.dir === 'D:/m')
+  ok('有正文 / 有清单都算值得恢复', it.draftWorthRestoring() === true
+    && it.draftWorthRestoring({ sourceText: '', data: { dir: 'D:/m' } }) === true
+    && it.draftWorthRestoring({ sourceText: '', localFiles: [{ path: '（浏览器本地）x.png' }] }) === true)
+  it.draftClear()
+  ok('draftClear 清干净', it.draftGet() === null && it.draftWorthRestoring() === false)
+  ok('samePath 认同一目录的不同写法', it.samePath('D:\\media\\a\\', 'd:/media/a') === true
+    && it.samePath('D:\\media\\a', 'D:\\media\\b') === false
+    && it.samePath('', '') === false && it.samePath(null, 'D:/m') === false)
+  // 重扫不该把用户改过的勾选冲成"全勾"：草稿里记过的按草稿，新冒出来的按默认勾上
+  const merged = it.mergeSelection(['D:/m/a.png', 'D:/m/b.png', 'D:/m/new.png'], { 'D:/m/a.png': false, 'D:/m/b.png': true })
+  ok('重扫后：用户取消过的仍未勾选', merged['D:/m/a.png'] === false)
+  ok('重扫后：用户留着的仍勾选', merged['D:/m/b.png'] === true)
+  ok('重扫后：这次新出现的文件按默认勾上', merged['D:/m/new.png'] === true)
+  ok('没有草稿时全部按默认勾上', JSON.stringify(it.mergeSelection(['x', 'y'], null)) === JSON.stringify({ x: true, y: true }))
+  ok('空清单/坏入参不抛错', JSON.stringify(it.mergeSelection([], { a: false })) === '{}' && JSON.stringify(it.mergeSelection(undefined, null)) === '{}')
 }
 
 // ── 汇总 ───────────────────────────────────────────────────────────────────

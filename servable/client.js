@@ -660,6 +660,55 @@ window.__ModuleLoader__.load({
       return lines.join('\n')
     }
 
+    // ──────────────────────────────────────────────────── 面板草稿（内存） ───
+    // 面板是「打开时才挂载」的：点面板外面、按 Esc、再点一次 chip 都会卸载它，组件内的
+    // useState 随之清零。用户 2026-09-14 反馈：正粘着小说正文、勾着素材，手一滑点到面板外
+    // 就全没了。所以把**用户输入类**的三样提上来放在模块级内存里（正文 / 素材勾选 /
+    // 本地挑的文件），连上次那份扫描清单一起记着，收起再打开原样恢复。
+    //
+    // 刻意**不写磁盘**：正文这类内容不该进宿主 state.json，也不想每次输入都发一次请求。
+    // 存活范围 = 本页面（client 模块活多久它活多久，刷新页面即清空）；面板底部给了
+    // 一个独立的「清空草稿」入口，不必为关闭面板弹确认框。
+    var DRAFT = null
+    /** 两份路径是不是同一个目录（扫描返回值与面板里记的值可能差在分隔符/大小写上）。 */
+    function samePath(a, b) {
+      if (typeof a !== 'string' || typeof b !== 'string' || a === '' || b === '') return false
+      var norm = function (p) { return p.replace(/[\\/]+/g, '\\').replace(/\\+$/, '').toLowerCase() }
+      return norm(a) === norm(b)
+    }
+    function draftGet() { return DRAFT }
+    function draftPatch(patch) {
+      var next = {}
+      var src = DRAFT || {}
+      var k
+      for (k in src) if (Object.prototype.hasOwnProperty.call(src, k)) next[k] = src[k]
+      for (k in patch) if (Object.prototype.hasOwnProperty.call(patch, k)) next[k] = patch[k]
+      DRAFT = next
+      return DRAFT
+    }
+    function draftClear() { DRAFT = null }
+    /** 重扫时怎么定勾选：**草稿里记过的路径**按草稿（用户改过的选择不能被重扫冲掉），
+     *  这次新冒出来的路径按扫描默认（勾上）。纯函数，测试缝见 selfcheck。 */
+    function mergeSelection(paths, restored) {
+      var out = {}
+      var list = Array.isArray(paths) ? paths : []
+      for (var i = 0; i < list.length; i++) {
+        var p = list[i]
+        out[p] = restored && Object.prototype.hasOwnProperty.call(restored, p) ? restored[p] === true : true
+      }
+      return out
+    }
+    /** 草稿里有没有值得恢复的东西（空草稿不该覆盖"刚打开就扫描一次"的默认行为）。 */
+    function draftWorthRestoring(d) {
+      d = d || DRAFT
+      if (!d) return false
+      if (typeof d.sourceText === 'string' && d.sourceText !== '') return true
+      if (typeof d.sourcePath === 'string' && d.sourcePath !== '') return true
+      if (d.localFiles) return true
+      if (d.data && typeof d.data.dir === 'string' && d.data.dir !== '') return true
+      return false
+    }
+
     // ─────────────────────────────────────────────────────────── 面板 ────────
     function VideoPromptPanel(props) {
       var useState = React.useState
@@ -682,13 +731,15 @@ window.__ModuleLoader__.load({
       var noteState = useState('')
       var note = noteState[0]
       var setNote = noteState[1]
-      var dataState = useState(null)
+      // 挂载时先拿一份草稿快照：下面几处 state 的初值都由它来定（收起再打开恢复原状）。
+      var bootDraft = draftGet() || {}
+      var dataState = useState(bootDraft.data || null)
       var data = dataState[0]
       var setData = dataState[1]
-      var selectedState = useState({})
+      var selectedState = useState(bootDraft.selected || {})
       var selected = selectedState[0]
       var setSelected = selectedState[1]
-      var localState = useState(null)
+      var localState = useState(bootDraft.localFiles || null)
       var localFiles = localState[0]
       var setLocalFiles = localState[1]
       // 生图要求（可选项）—— 默认值即"什么都不用改也能跑"，所以面板一打开就是可用的
@@ -699,19 +750,19 @@ window.__ModuleLoader__.load({
       })
       var grokOpts = optsState[0]
       var setGrokOpts = optsState[1]
-      // 来源文本（小说免费章节 / 章纲）：只存在浏览器内存里，不写进宿主 state.json
-      var sourceState = useState('')
+      // 来源文本（小说免费章节 / 章纲）：只存在浏览器内存里（草稿里记着，不写进宿主 state.json）
+      var sourceState = useState(typeof bootDraft.sourceText === 'string' ? bootDraft.sourceText : '')
       var sourceText = sourceState[0]
       var setSourceText = sourceState[1]
       // 是否按来源文本生图（默认不勾：没人想在不注意的时候把整章正文塞进对话框）
-      var useSourceState = useState(false)
+      var useSourceState = useState(bootDraft.useSource === true)
       var useSource = useSourceState[0]
       var setUseSource = useSourceState[1]
-      var sourcePathState = useState('')
+      var sourcePathState = useState(typeof bootDraft.sourcePath === 'string' ? bootDraft.sourcePath : '')
       var sourcePath = sourcePathState[0]
       var setSourcePath = sourcePathState[1]
       // 落盘后的字数：请求里只带"路径 + 字数"当材料引用，正文不进请求，所以要有个准数可核对
-      var sourceCharsState = useState(0)
+      var sourceCharsState = useState(Number(bootDraft.sourceChars) || 0)
       var sourceChars = sourceCharsState[0]
       var setSourceChars = sourceCharsState[1]
       // 来源文本默认收起：它一展开就占 100px 以上，窄屏上会把底部按钮挤到面板外
@@ -750,7 +801,19 @@ window.__ModuleLoader__.load({
               setGrokOpts(function (prev) { return Object.assign({}, prev, state.grokOptions) })
             }
             if (state.pipelineMode === 'prompt' || state.pipelineMode === 'viral') setPipelineMode(state.pipelineMode)
-            if (nextFolder) void scan(nextFolder)
+            // 草稿里有东西 ⇒ 明确说一句"恢复了什么"（用户 2026-09-14：状态反馈要可信，
+            // 别让用户猜刚才粘的正文还在不在）。清单能直接复用就不重扫，否则照旧扫一次。
+            var draft = draftGet()
+            if (draftWorthRestoring(draft)) {
+              var reused = !!(draft.data && samePath(draft.data.dir, nextFolder))
+              setNote('已恢复收起前的草稿：'
+                + (typeof draft.sourceText === 'string' && draft.sourceText !== '' ? '正文 ' + draft.sourceText.length + ' 字 · ' : '')
+                + (draft.localFiles ? '含本地挑选的文件 · ' : '')
+                + (reused ? '素材清单与勾选都在（要刷新点「扫描」）' : '素材清单待扫描'))
+              if (!reused && nextFolder) void scan(nextFolder)
+            } else if (nextFolder) {
+              void scan(nextFolder)
+            }
           } else if (res && res.error) {
             setError('宿主未就绪：' + res.error)
           }
@@ -759,6 +822,20 @@ window.__ModuleLoader__.load({
         })
         return function () { alive = false }
       }, [])
+
+      // 草稿回写：上面那几样用户输入一变就同步进内存草稿（纯内存，不发请求、不写盘）。
+      // 面板随时可能被卸载（点外面 / Esc），不能指望卸载钩子，所以边走边记。
+      useEffect(function () {
+        draftPatch({
+          sourceText: sourceText,
+          useSource: useSource,
+          sourcePath: sourcePath,
+          sourceChars: sourceChars,
+          localFiles: localFiles,
+          selected: selected,
+          data: data,
+        })
+      }, [sourceText, useSource, sourcePath, sourceChars, localFiles, selected, data])
 
       // 面板超宽/下方放不下时翻到左侧、向上展开，避免溢出视口；
       // 顺带按可用高度重排中段（flipPanelIntoView 内部会调 layoutPanel）。
@@ -809,9 +886,14 @@ window.__ModuleLoader__.load({
           }
           setData(res)
           setLocalFiles(null)
-          var next = {}
-          var all = (res.images || []).concat(res.videos || [], res.texts || [])
-          for (var i = 0; i < all.length; i++) next[all[i].path] = true
+          // 同一个目录的草稿勾选优先：收起再打开、或手动「扫描」刷新时，别把用户改过的勾选
+          // 冲成全勾（只有这次新冒出来的文件才用扫描默认值 = 勾上）。
+          var restoredSel = null
+          var draftSnapshot = draftGet()
+          if (draftSnapshot && draftSnapshot.selected && samePath(draftSnapshot.data && draftSnapshot.data.dir, res.dir)) {
+            restoredSel = draftSnapshot.selected
+          }
+          var next = mergeSelection((res.images || []).concat(res.videos || [], res.texts || []).map(function (x) { return x.path }), restoredSel)
           setSelected(next)
           setNote('扫描完成：图片 ' + (res.images || []).length + ' · 视频 ' + (res.videos || []).length
             + ' · 文档 ' + (res.texts || []).length
@@ -978,8 +1060,11 @@ window.__ModuleLoader__.load({
           var text = buildRequest(processDir)
           var result = dispatchToComposer(text)
           if (result.ok) {
+            // 措辞守着这个事实：按钮做的是"把请求写进输入框"，**任务还没开始**，
+            // 用户按 Enter 才算派发（用户 2026-09-14 反馈：主按钮容易被读成"点完就开跑"）。
             setNote((processDir ? '过程目录已建：' + processDir + ' · ' : '')
-              + '已写入输入框（' + chosen.length + ' 项）—— 确认后按 Enter 发送')
+              + '已填入输入框（' + chosen.length + ' 项），等待发送 —— 按 Enter 才开始；'
+              + '这时收起面板也不丢草稿。')
             if (data && data.dir) {
               void jsonFetch('/dvp/manifest', {
                 method: 'PUT',
@@ -1017,6 +1102,23 @@ window.__ModuleLoader__.load({
             else setError('复制失败，请手动选中文本复制')
           })
         })
+      }
+
+      /** 「清空草稿」：丢掉面板记住的草稿，把正文/本地文件清掉、勾选回到扫描默认。
+       *  刻意不做成"每次关闭都问一句"—— 关闭面板一律保留，想丢就在这里丢。 */
+      function clearDraftNow() {
+        draftClear()
+        setSourceText('')
+        setUseSource(false)
+        setSourcePath('')
+        setSourceChars(0)
+        setLocalFiles(null)
+        var all = (data && (data.images || []).concat(data.videos || [], data.texts || [])) || []
+        var fresh = {}
+        for (var i = 0; i < all.length; i++) fresh[all[i].path] = true
+        setSelected(fresh)
+        setError('')
+        setNote('草稿已清空：正文、本地挑选的文件、勾选都不再记忆（素材清单本身保留，点「扫描」可刷新）。')
       }
 
       // 只用图片：建 Grok 批次（plan.json + driver.md）并把驱动请求写进输入框
@@ -1481,13 +1583,23 @@ window.__ModuleLoader__.load({
           // 说明压到最短：这一行太长会把底部按钮挤到面板外面（窄屏实测过）
           h('div', { className: 'dvp-hint' },
             isViral
-              ? '已选 ' + chosen.length + ' 项（视频 ' + chosenVideos + ' · 图片 ' + chosenImages + (chosenDocs ? ' · 文档 ' + chosenDocs : '') + '）。点「生成爆款元素」：先建过程目录（年-月-日_时分），再把分析请求写进输入框。'
-              : '已选 ' + chosen.length + ' 项（视频 ' + chosenVideos + ' · 图片 ' + chosenImages + (chosenDocs ? ' · 文档 ' + chosenDocs : '') + '）。点「派发到会话」写入输入框，Enter 前还能改。',
+              ? '已选 ' + chosen.length + ' 项（视频 ' + chosenVideos + ' · 图片 ' + chosenImages + (chosenDocs ? ' · 文档 ' + chosenDocs : '') + '）。点「准备分析请求」：先建过程目录（年-月-日_时分），再把分析请求写进输入框 —— 还没开始跑，按 Enter 才发送。'
+              : '已选 ' + chosen.length + ' 项（视频 ' + chosenVideos + ' · 图片 ' + chosenImages + (chosenDocs ? ' · 文档 ' + chosenDocs : '') + '）。点「准备生图请求」写入输入框，按 Enter 才发送，回车前还能改。',
           ),
           h('div', { className: 'dvp-btns' },
+            h('button', { className: 'dvp-btn', type: 'button', onClick: clearDraftNow, title: '丢掉面板记住的草稿（正文 / 本地挑选的文件 / 勾选）。收起面板不会丢草稿，要丢点这里' }, '清空草稿'),
             h('button', { className: 'dvp-btn', type: 'button', onClick: copyRequest }, '复制请求'),
             isViral ? null : h('button', { className: 'dvp-btn', type: 'button', onClick: dispatchGrok, disabled: chosenImages === 0, title: chosenImages === 0 ? 'Grok 出图只吃图片' : '建 Grok 批次并驱动 Edge 出图' }, '用 Grok 生图'),
-            h('button', { className: 'dvp-btn primary', type: 'button', onClick: dispatch }, isViral ? '生成爆款元素' : '派发到会话'),
+            // 主按钮只说它真正做的事：把请求"准备"进输入框。任务由用户按 Enter 才开跑，
+            // 所以不叫「生成爆款元素 / 派发到会话」（用户 2026-09-14 反馈会被读成已经开跑）。
+            h('button', {
+              className: 'dvp-btn primary',
+              type: 'button',
+              onClick: dispatch,
+              title: isViral
+                ? '按「路径」与勾选的素材组织分析请求，写进输入框（任务不会自动开始；按 Enter 才发送）'
+                : '按勾选的素材组织提示词请求，写进输入框（任务不会自动开始；按 Enter 才发送）',
+            }, isViral ? '准备分析请求' : '准备生图请求'),
           ),
         ),
       )
@@ -1596,7 +1708,7 @@ window.__ModuleLoader__.load({
           '对话框旁的模式入口（与 PPT 同一按钮簇，另外在输入条右侧常驻一个 chip）。',
           '选一个媒体文件夹，面板按图片／视频／文档三列分流列出素材（每列带独立滚动条，层数可调），',
           '顶部「路径」二选一：素材→提示词→生图（主线），或 视频/图片→爆款元素（蒸馏）。',
-          '勾选后「派发到会话」把请求写进输入框，由 agent 按 video-prompt-pipeline 逐项产出提示词；',
+          '勾选后「准备生图请求」把请求写进输入框（按 Enter 才发送），由 agent 按 video-prompt-pipeline 逐项产出提示词；',
           '也可以粘一段小说正文/章纲或加 txt/md 文件，按主要情节生图，',
           '最后「用 Grok 生图」建批次并驱动 Edge 出图。每次派发自动建过程目录（process\\年-月-日_时分-素材名），',
           '拆帧与分析产物都写那里。面板里「背后的逻辑」一栏写了全部规则。',
@@ -1712,6 +1824,13 @@ window.__ModuleLoader__.load({
       GROK_OPTIONS: GROK_OPTIONS,
       PIPELINE_MODES: PIPELINE_MODES,
       VideoPromptPanel: VideoPromptPanel,
+      // 草稿（内存）：面板收起/关掉不该丢用户输入。测试缝用来断言"存了没、恢复对不对、清了没"。
+      draftGet: draftGet,
+      draftPatch: draftPatch,
+      draftClear: draftClear,
+      draftWorthRestoring: draftWorthRestoring,
+      mergeSelection: mergeSelection,
+      samePath: samePath,
       flipPanelIntoView: flipPanelIntoView,
       layoutPanel: layoutPanel,
       findComposerEditor: findComposerEditor,
