@@ -178,28 +178,36 @@
 
 ## 发布前检查（CI 与本地同一条命令）
 
-push / PR 都会跑 `.github/workflows/ci.yml`，它只做一件事：`npm test`。本地跑的就是同一条命令，
-**不装任何依赖、不联网、不读真实媒体盘、不调模型**：
+push / PR 都会跑 `.github/workflows/ci.yml`，它做两件事：`npm ci`（只装 devDependencies）→ `npm test`。
+本地跑的就是同一条命令：
 
 ```bash
+npm install                    # 只装 devDependencies（react + react-dom，selfcheck 要用）；CI 用 npm ci
 npm test                       # = node tools/run-all.mjs
 node tools/run-all.mjs --list  # 只看清单：跑哪些、以及哪些被排除、为什么
 ```
 
+**出网边界**：只有 `npm ci` / `npm install` 那一步出网（按 `package-lock.json` 装 devDependencies）。
+`npm test` 本身**不出网** —— 不读真实媒体盘、不调模型、不做真实下载。
+
 `tools/run-all.mjs` 把每套都跑完再汇总，任一套非 0 退出 ⇒ `npm test` 退出码 1 ⇒ CI 变红。
 CI 用 Node 20/22/24 三档矩阵、windows-latest。
 
-本机实测（Node 24.9.0）参与门禁的两套：
+干净环境实测（`DSH_HOME` / `APPDATA` / `LOCALAPPDATA` / `USERPROFILE` / `DSH_APP_DIR` 全指空目录，
+独立下载的 node，且先 `npm ci` 复现 CI 的全新检出），三档（Node 20/22/24）结果一致 —— **3/3 套件通过**：
 
-| 套件 | 本机结果 |
+| 套件 | 结果 |
 | --- | --- |
 | `tools/probe-host.mjs` | 187 项通过 |
 | `tools/verify-watch-idle.mjs` | 18 项通过 |
+| `tools/selfcheck.mjs` | 237 项通过 |
+
+> `selfcheck.mjs` 原来因为"用 `createRequire` 从**本机 DSH 安装目录**解析 `react`/`react-dom`"被排除。
+> 现在 `react`/`react-dom` 进 `devDependencies`，`run-all.mjs` 把 `DSH_APP_DIR` 指向**仓库根**，
+> 于是本地与 CI 都不再依赖任何人的安装路径。
 
 **未纳入 CI** 的套件（原因同时写在 `tools/run-all.mjs` 的 `EXCLUDED` 里）：
-`tools/probe-live.mjs`（要真实媒体盘里的素材）、
-`tools/selfcheck.mjs`（230 项，但用 `createRequire` 从本机 DSH 安装目录解析 `react`/`react-dom`，
-CI 里没有这两包 ⇒ 想纳入就先给 `package.json` 加这两个开发依赖、并让 `DSH_APP_DIR` 指向仓库根）。
+`tools/probe-live.mjs`（要真实媒体盘里的素材文件；它是探针脚本，不是断言式套件）。
 
 ## 安装（已经装好，这里是复现方式）
 

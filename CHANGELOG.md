@@ -1,5 +1,31 @@
 # 变更记录
 
+## 未发布 — CI 装测试依赖 + 恢复 selfcheck（react/react-dom 进 devDependencies，DSH_APP_DIR 指向仓库根）
+
+**问题（"本机全绿、干净机器/CI 全红"）**：`tools/selfcheck.mjs` 第 3e 节要"真 React 渲染成 HTML"，
+它用 `createRequire(DSH_APP_DIR/package.json)` 解析 `react` / `react-dom`；
+`DSH_APP_DIR` 没设时还会从 `process.execPath` 反推（`<app>/node_modules/node/bin/node.exe ⇒ 上三级`），
+也就是**本机 DSH 安装目录**。干净环境里这两条路都拿不到那两包 ⇒
+离线报 `Cannot find module 'react'` ⇒ 该套件只能被排除在 CI 之外。
+
+**改法**（不重构，三步）：
+1. `package.json` 加 `devDependencies: { "react": "18.3.1", "react-dom": "18.3.1" }`
+   （与宿主 DSH Desktop 内置的 React 同版本，渲染出的面板与用户实际看到的是同一大版本），
+   并加 `engines.node >= 20`。
+2. `tools/run-all.mjs` 的 `ENV` 加 `DSH_APP_DIR: REPO` —— 把那个缝**指向仓库根**，
+   于是 `createRequire('<repo>/package.json')` 解析到仓库自己的 `node_modules/`（CI 由 `npm ci` 装出）。
+3. `tools/run-all.mjs` 把 `tools/selfcheck.mjs` 从 `EXCLUDED` 挪进 `SUITES`。
+   新增 `.npmrc`（`legacy-peer-deps=true` + 钉 `registry.npmjs.org`），提交 `package-lock.json`
+   （只有 5 个包：react / react-dom / scheduler / loose-envify / js-tokens）。
+   `.github/workflows/ci.yml` 加 `npm ci` 与 `cache: npm`，并写明**测试执行期间不出网**。
+
+**数字**：
+- `selfcheck` 在干净环境（`DSH_HOME`/`APPDATA`/`LOCALAPPDATA`/`USERPROFILE`/`DSH_APP_DIR` 全指空目录）
+  **全部通过：237 项检查**（`DSH_APP_DIR` 未指向仓库根时必报 `Cannot find module 'react'`）。
+- `npm test` 三档 **Node 20 / 22 / 24 均退出码 0**，
+  套件 **3/3 通过**：`probe-host` 187 项 + `verify-watch-idle` 18 项 + `selfcheck` 237 项。
+- 仍然排除 `tools/probe-live.mjs`（要真实媒体盘里的素材文件；它是探针脚本，不是断言式套件）。
+
 ## 未发布 — 修 P2 批次：请求载荷、运行期目录、局部保存、派发历史、收图退出
 
 一轮只读审计报了 5 条缺陷，**逐条先核实**（读代码 + 最小复现）再改。5 条全部成立，

@@ -21,6 +21,13 @@
   "scripts": {
     "test": "node tools/run-all.mjs"
   },
+  "devDependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "files": [
     "index.js",
     "client.js",

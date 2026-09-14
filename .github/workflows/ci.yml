@@ -1,16 +1,21 @@
 name: CI
 
-# 发布前检查：push / PR 都跑同一套离线测试，任一环节非 0 退出即整体失败。
+# 发布前检查：push / PR 都跑同一套测试，任一环节非 0 退出即整体失败。
 #
-# 为什么是 windows-latest：套件都在 Windows 上实测通过（本机无 WSL 发行版，Linux/macOS 未实测）。
-# 为什么是 20/22/24 矩阵：仓库没写 engines，按 20/22 = 常见 LTS、24 = DSH Desktop 实际内置的运行时；
-#   三档已用**独立下载的** node 在干净环境逐套实测通过。
+# 为什么是 windows-latest：套件都在 Windows 上实测通过（本机无 WSL 发行版，Linux/macOS 未实测 ⇒ 不放进 CI 冒红）。
+# 为什么是 20/22/24 矩阵：仓库没写死运行时，按 20 = 最老仍常见的 LTS、22 = 当前 LTS、
+#   24 = DSH Desktop 实际内置的运行时。三档已用**独立下载的** node 在干净环境各跑一遍，
+#   均为 0/0 语法门禁 + 3/3 套件通过（probe-host 187 项 + verify-watch-idle 18 项 + selfcheck 237 项）。
 #
-# 全程不联网跑测试：不读真实媒体盘、不调模型、不做真实下载。
+# 【测试执行期间不出网 —— 这条是硬约束，加依赖安装步骤**不**放宽它】
+#   · 允许出网的只有下面 `npm ci` 那一步：它按 package-lock.json 把 devDependencies
+#     （react + react-dom，selfcheck 要用真 React 把面板渲染成 HTML）装下来。
+#   · `npm test` 本身（node tools/run-all.mjs）**不许有任何网络访问**：不做真实下载、不调模型、
+#     不读真实媒体盘（%APPDATA% / 真实素材盘一律不碰）。
+#   · 依赖是**装出来**的（这一步已经装完），不是测试运行时现下载的 —— 两者的区别就是这条约束的边界。
+#
 # 已排除的套件与原因（详见 tools/run-all.mjs 的 EXCLUDED）：
-#   · probe-live.mjs —— 要真实媒体盘里的素材文件
-#   · selfcheck.mjs  —— 用 createRequire 从本机 DSH 安装目录解析 react / react-dom，CI 里没有这两包
-#                       （想纳入就给 package.json 加 react/react-dom 开发依赖，并让 DSH_APP_DIR 指向仓库根）
+#   · probe-live.mjs —— 要真实媒体盘里的素材文件（探针脚本，不是断言式套件）
 on:
   push:
   pull_request:
@@ -27,6 +32,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-      # npm test = node tools/run-all.mjs：跑完再汇总，任一套失败 ⇒ 退出码 1。
-      # 测试不需要任何依赖，所以没有 npm install（离线可跑）。
+          cache: npm
+      # 只装 devDependencies（package-lock.json 已提交 ⇒ 用 ci 保证与本地逐字节一致）。
+      # .npmrc 里开了 legacy-peer-deps：peerDependencies 是**宿主 DSH 运行时**提供的
+      # （@deepseek-ai/cordis、dsh-host-webserver、react…），只有 selfcheck 需要一份真 react。
+      # 不关掉的话 npm 7+ 会自动去装那一整套 @deepseek-ai/*，等于把 CI 押在宿主发布状态上。
+      - run: npm ci --no-audit --no-fund
+      # npm test = node tools/run-all.mjs：每套都跑完再汇总，任一套失败 ⇒ 退出码 1。
+      # 这一步**不出网**。
       - run: npm test

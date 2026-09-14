@@ -7,7 +7,10 @@
 // 为什么不用 `a.mjs && b.mjs` 串：第一套一失败后面的根本不跑，一次 push 只能暴露一个错误。
 // 这里每套都跑、逐套列结果，任一套非 0 退出 ⇒ 本进程退出码 1 ⇒ CI 变红。
 //
-// 本清单只含**离线套件**：不联网、不读真实媒体盘、不读本机 DSH 安装目录。
+// 本清单只含**离线套件**：测试执行期间**不联网**（不做真实下载、不调模型）、不读真实媒体盘。
+// 需要真实媒体盘的套件写在 EXCLUDED 里（含原因），不参与 CI。
+// selfcheck 需要一份 react / react-dom：由 package.json 的 devDependencies 声明、CI 的 npm ci 装出 ——
+// 依赖是"装出来"的，不是"测试时下载的"。
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -22,14 +25,23 @@ const CHECKS = []
 const SUITES = [
   'tools/probe-host.mjs',
   'tools/verify-watch-idle.mjs',
+  // selfcheck 里的面板渲染要一份真 react / react-dom（createRequire(DSH_APP_DIR/package.json) 解析）。
+  // 原来它指向**本机 DSH 安装目录**（DSH_APP_DIR 没设时还会从 process.execPath 反推），
+  // 于是"本机全绿、干净机器/CI 全红"。现在由下面的 ENV 把 DSH_APP_DIR 指向**仓库根**，
+  // 配合 package.json 的 devDependencies（react + react-dom）就能在干净环境跑通 —— 2026-09 从 EXCLUDED 挪回。
+  'tools/selfcheck.mjs',
 ]
 
 const EXCLUDED = [
-  ['tools/probe-live.mjs', '要真实媒体盘里的素材文件才能跑'],
-  ['tools/selfcheck.mjs', '用 createRequire 从 DSH 安装目录（DSH_APP_DIR）解析 react / react-dom，CI 里没有这两包 ⇒ 离线报 "Cannot find module \'react\'"'],
+  ['tools/probe-live.mjs', '要真实媒体盘里的素材文件才能跑（探针脚本，不是断言式套件）'],
 ]
 
-const ENV = {}
+// 让套件按**本仓库实际位置**解析插件与 react，不依赖任何人的绝对路径或本机 DSH 安装目录。
+// DSH_APP_DIR 指向仓库根：selfcheck.mjs 用它 createRequire('<repo>/package.json')，
+// 于是 'react' / 'react-dom' 解析到仓库自己的 node_modules（CI 由 npm ci 装出）。
+const ENV = {
+  DSH_APP_DIR: REPO,
+}
 
 // ---- 登记完备性 + 已知失败 ------------------------------------------------
 // tools/ 下每个「看起来是套件」的文件都必须在 SUITES / EXCLUDED / KNOWN_FAILING 里登记，
