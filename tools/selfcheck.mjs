@@ -203,6 +203,19 @@ ok('派发请求写明批次 ID', grokBatchText.includes('批次 ID：2026-09-14
 ok('派发请求要求存图带 batch=批次ID（raw 直传的 URL 参数）', grokBatchText.includes('batch=2026-09-14_1238-doorbell'))
 ok('派发请求要求字节直传而非 base64 搬回会话', grokBatchText.includes('raw') || grokBatchText.includes('字节'))
 ok('不传批次时这三行不出现（老调用方不受影响）', !grokNoDocs.includes('批次 ID：') && !grokNoDocs.includes('batch='))
+// nonce（/dvp/grok/save 的门②）：宿主建批次时发下来，派发请求必须把它交给 agent ——
+// 否则 agent 在页面里存图会撞 403，而它没有任何别的途径拿到这把钥匙（GET /dvp/grok/plan 刻意不回吐）。
+const NONCE = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+const grokNonceText = exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output/2026-09-14_1238-doorbell', '', undefined, undefined, '', '2026-09-14_1238-doorbell', NONCE)
+ok('派发请求写明 nonce（存图钥匙）', grokNonceText.includes('存图 nonce：' + NONCE))
+ok('派发请求要求存图带 nonce=', grokNonceText.includes('nonce=' + NONCE))
+ok('派发请求把 nonce 与 batch 并列写成同一个 URL 参数口径', grokNonceText.includes('batch=2026-09-14_1238-doorbell') && grokNonceText.includes('nonce=' + NONCE) && grokNonceText.includes('X-DVP-Nonce'))
+ok('派发请求写明 nonce 错了会被拒（403）', grokNonceText.includes('403'))
+// 不给 nonce 的调用（老批次/老调用方）：请求里不许出现"要带 nonce"的指令，也不许凭空冒出钥匙。
+// 注意参数列举里那个 `nonce` 是路由支持的参数名（`批次/序号/slug/nonce`），不算"要带 nonce"。
+ok('不给 nonce 时请求里没有"存图 nonce："指令、也没有 nonce= 参数（老调用方不受影响）',
+  !grokBatchText.includes('存图 nonce：') && !grokBatchText.includes('nonce=')
+  && !grokNoDocs.includes('存图 nonce：') && !grokNoDocs.includes('nonce='), { batch: grokBatchText.includes('存图 nonce：'), none: grokNoDocs.includes('nonce') })
 
 // ── 3c. 生图要求（可选项）──────────────────────────────────────────────────
 section('3c) 生图要求（可选项）')

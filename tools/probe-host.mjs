@@ -377,10 +377,12 @@ ok('内容一致', srcPut.ok && (await fsp.readFile(srcPut.file, 'utf8')).includ
 const srcEmpty = await fetch(BASE + '/dvp/source', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: '   ' }) })
 ok('空文本被拒 400', srcEmpty.status === 400, srcEmpty.status)
 
+// nonce 必须带上（/dvp/grok/save 门②）：建批次时宿主发下来的 saveNonce 就在 plan 响应里。
+ok('批次响应带 saveNonce（存图要用的那把钥匙）', typeof plan.saveNonce === 'string' && plan.saveNonce.length >= 32, plan.saveNonce)
 const save1 = await (await fetch(BASE + '/dvp/grok/save', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ index: 1, slug: 'men-lang', base64: 'data:image/png;base64,' + PNG_1x1.toString('base64'), note: 'probe' }),
+  body: JSON.stringify({ index: 1, slug: 'men-lang', base64: 'data:image/png;base64,' + PNG_1x1.toString('base64'), note: 'probe', nonce: plan.saveNonce }),
 })).json()
 ok('base64 图片保存成功', save1.ok === true && save1.bytes === PNG_1x1.length, save1)
 ok('文件名按序号+slug 命名', save1.ok && path.basename(save1.file) === '01-men-lang.png', save1.file)
@@ -426,16 +428,22 @@ ok('① 同名来源文件各自独立（不互相盖）', planA.sourceFile === 
   && (await fsp.readFile(planA.sourceFile, 'utf8')) === '第一批正文' && (await fsp.readFile(planB.sourceFile, 'utf8')) === '第二批正文')
 ok('① driver.md 也在各自目录里', existsSync(path.join(batchA.dir, 'driver.md')) && existsSync(path.join(batchB.dir, 'driver.md')))
 ok('① 老位置不再被写（grok-output 根下没有 plan.json）', !existsSync(path.join(MEDIA, 'grok-output', 'plan.json')))
-// 同名 slug 的图：两批各存一张，互不覆盖（第 ① 条的"下游图片"半边）
-const imgBytesA = Buffer.from('AAAA-first-batch', 'utf8')
-const imgBytesB = Buffer.from('BBBB-second-batch', 'utf8')
+// 两批各存一张**同 slug 的真图**（门③要求确实是图片字节；PNG 尾部塞一段私有 tEXt 让两批字节可区分）。
+const pngWithText = (text) => {
+  const body = Buffer.from('tEXt' + text, 'latin1')
+  const len = Buffer.alloc(4)
+  len.writeUInt32BE(body.length - 4, 0)
+  return Buffer.concat([PNG_1x1, len, body, Buffer.alloc(4)])
+}
+const imgBytesA = pngWithText('first-batch')
+const imgBytesB = pngWithText('second-batch')
 const saveA = await (await fetch(BASE + '/dvp/grok/save', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ batchId: batchA.batchId, index: 1, slug: 'same-slug', ext: '.png', base64: 'data:image/png;base64,' + imgBytesA.toString('base64') }),
+  body: JSON.stringify({ batchId: batchA.batchId, index: 1, slug: 'same-slug', ext: '.png', base64: 'data:image/png;base64,' + imgBytesA.toString('base64'), nonce: batchA.saveNonce }),
 })).json()
 const saveB = await (await fetch(BASE + '/dvp/grok/save', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ batchId: batchB.batchId, index: 1, slug: 'same-slug', ext: '.png', base64: 'data:image/png;base64,' + imgBytesB.toString('base64') }),
+  body: JSON.stringify({ batchId: batchB.batchId, index: 1, slug: 'same-slug', ext: '.png', base64: 'data:image/png;base64,' + imgBytesB.toString('base64'), nonce: batchB.saveNonce }),
 })).json()
 ok('① 同名 slug 的图分别落在各自批次目录', saveA.ok && saveB.ok && saveA.file !== saveB.file
   && path.dirname(saveA.file) === batchA.dir && path.dirname(saveB.file) === batchB.dir, { a: saveA.file, b: saveB.file })
@@ -515,7 +523,7 @@ const badGet = await fetch(BASE + '/dvp/grok/plan?batch=' + encodeURIComponent('
 ok('⑤ GET 越界 batch 被拒 400', badGet.status === 400, badGet.status)
 const badSave = await fetch(BASE + '/dvp/grok/save', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ batchId: '../evil', index: 1, slug: 'x', base64: 'data:image/png;base64,' + PNG_1x1.toString('base64') }),
+  body: JSON.stringify({ batchId: '../evil', index: 1, slug: 'x', base64: 'data:image/png;base64,' + PNG_1x1.toString('base64'), nonce: plan.saveNonce }),
 })
 ok('⑤ save 越界 batchId 被拒 400', badSave.status === 400, badSave.status)
 ok('⑤ 越界没有在 grok-output 之外留下任何东西', !existsSync(path.join(TMP, 'evil')) && !existsSync(path.join(MEDIA, 'evil')))

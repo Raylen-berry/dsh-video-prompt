@@ -48,8 +48,10 @@ export function renderDriverDoc(plan) {
   lines.push('4. **等流式输出收尾**（`Stop model response` 消失、出现 `Download`/`Make video` 工具条）再去取图；')
   lines.push('   生成中取到的是占位图。单条超时 120 秒记失败并继续。')
   lines.push('5. 取图只能发生在已登录的页面上下文里（签名 URL 换 node 直连是 403，canvas 被 CORS 污染）。')
-  lines.push('   首选通道：页面内 fetch 成 arrayBuffer 后把字节**原样** `POST /dvp/grok/save?index=<序号>&slug=<slug>&batch=<批次ID>`')
+  lines.push('   首选通道：页面内 fetch 成 arrayBuffer 后把字节**原样** `POST /dvp/grok/save?index=<序号>&slug=<slug>&batch=<批次ID>'
+    + (plan.saveNonce ? '&nonce=' + plan.saveNonce : '') + '`')
   lines.push('   （raw bytes；宿主回 {file,bytes,sha256,width,height} 元信息即落盘成功）。')
+  if (plan.saveNonce) lines.push('   ⚠️ `nonce` 是宿主要求的存图钥匙（缺了/错了直接 403）：用本批次 plan.json 里那个，别改成别的值。')
   lines.push('   ⚠️ 图片内容/base64 一律不进会话文本（1 MiB 图 ≈ 140 万字符，爆上下文且会被结果上限截坏）；')
   lines.push('   拿不到字节时的兜底只能盘到盘：`node tools/scan-cache.mjs --bytes <体积> --out <本目录>` 从浏览器缓存直接捞，')
   lines.push('   或请用户在真实浏览器里点一次 Download，然后用')

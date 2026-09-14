@@ -1,5 +1,46 @@
 # 变更记录
 
+## 未发布 — /dvp/grok/save 收口：CORS 白名单回显 + 批次 nonce + 图片魔术字节
+
+**问题**：上一轮为了让"页面内直传图片字节"能读回元信息，把这一条本机路由的 CORS 写成了
+`Access-Control-Allow-Origin: *`。头本身是必要的（图是在 **grok.com 那个跨源页面**里读出来再 POST 回
+127.0.0.1 的），但 `*` + 无鉴权 ⇒ **任何被访问过的网页**都能 POST 到这个本机端点：
+写入虽被批次目录围栏限制，仍等于开了一个"任意网页可写（图片/任意字节）+ 可读元信息（路径/哈希/宽高）"的口子。
+
+**核实**（动手前先读清楚）：页面侧脚本是 `tools/grok-shot.mjs` 的 `grokRecipe()` 生成的
+「给浏览器插件的操作清单」里的那段 JS —— 它由 `browser_eval` 在页面上下文里执行，POST 的 URL
+（`?index=&slug=&batch=&ext=`）与请求头都由这段 JS 自己拼。**结论：能携带额外参数**，
+所以 nonce 方案成立，不必退化成"只做白名单"。
+
+**改法**（三道门，集中定义在 `index.js` 顶部同名注释段）：
+
+1. **白名单回显**：`GROK_SAVE_ALLOWED_ORIGINS = ['https://grok.com', 'https://x.ai']` 及其子域；
+   回显**请求自己的 Origin**（不再回 `*`），并带 `Vary: Origin`。判据是解析后的 hostname，
+   不是字符串后缀 —— `grok.com.evil.example` / `notgrok.com` / `http://grok.com`（协议降级）一律不认。
+   白名单外的源：**一个 CORS 头都不回** + 403。没有 Origin 头（同源面板调用、node/curl 调用方）照常放行：
+   CORS 管不到它们，边界靠门②与批次目录围栏。运维口 `DVP_GROK_SAVE_ORIGINS`。
+2. **批次 nonce**：`POST/PUT /dvp/grok/plan` 建批次（或续做）时发一把 32 字节随机 nonce，
+   回在响应里、写进该批 `plan.json`（宿主重启后仍能校验）、随 `driver.md` 与面板派发请求交给会话；
+   存图时 `?nonce=` 或请求头 `X-DVP-Nonce` 带上，缺/错一律 403。重发同一批换新 nonce，旧的立刻作废。
+   `GET /dvp/grok/plan` 的 `plan` 里**不含** nonce（那是跨源读得到的只读端点）。比较走
+   `timingSafeEqual`（定长、不看长度）。nonce 只在这条批次通道里有效，不是账号凭据；
+   除批次 `plan.json`、建批次响应、驱动清单/派发请求外不再另发一份，也不写任何日志。
+   逃生口 `DVP_GROK_SAVE_ALLOW_ANON=1`（默认关，只认环境变量）。
+3. **图片魔术字节**：按魔数收 PNG/JPEG/GIF/WebP（不看扩展名与 content-type，页面直传常常是
+   `application/octet-stream`），拒绝时 415 并回带请求体前 16 字节；账本新增 `signature` 字段记下
+   真实封装。
+
+**数字**（`tools/verify-grok-bytes.mjs` 离线断言，本机实测）：
+
+| 口径 | 结果 |
+| --- | --- |
+| 新增断言 | 71 → 121 项（其中「三道门」段 50 项） |
+| 全仓套件 | `npm test` 4/4 通过、570 项检查（188 + 18 + 121 + 243） |
+| 反向验证（断言指向改动前 `034a7cf`） | **37 / 121 项失败**（白名单回显、非白名单源 403、nonce 四种拒绝、非图片 415、正常路径回显全部报错） |
+
+反向验证用 `git worktree add <临时目录> 034a7cf` + 只把新的 `tools/verify-grok-bytes.mjs` 拷过去，
+跑完 `git worktree remove --force`（不用 `git stash`）。
+
 ## 未发布 — 图片字节彻底移出模型上下文（raw bytes 直传 /dvp/grok/save）
 
 **问题**：取图的兜底是"宿主不可用就把图 **base64 每 20k 字符分块**交回会话，再在会话里拼回去写盘"。

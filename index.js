@@ -19,6 +19,7 @@
 //        POST /dvp/grok/plan                 建 Grok 出图批次（含生图要求与来源文本）
 //        POST /dvp/grok/save                 保存抓到的成图字节（首选 raw bytes 直传，
 //                                            兼容 JSON base64/URL；响应只回元信息，字节不进会话）
+//                                            CORS 白名单回显 + 批次 nonce + 图片魔术字节，三道门见下方同名注释
 //        POST /dvp/skills/reload             重扫技能目录：开机后新增的技能免重启注册
 //                                            （同名 first-wins，改已有技能正文仍需重启）
 //
@@ -37,7 +38,7 @@
 
 import { createReadStream, existsSync, promises as fsp, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
 
@@ -299,6 +300,188 @@ async function touchGrokIndex(root, batchId) {
   } catch { /* 索引只是加速件 */ }
 }
 
+// ── /dvp/grok/save 的三道门（CORS 白名单 · nonce · 魔术字节）──────────────────
+//
+// 背景（2026-09 那一轮放开 CORS 时留下的口子）：图是在 **grok.com 那个跨源页面**里读出来、
+// 再 POST 回 127.0.0.1 的，所以这一条路由必须回 CORS 头，否则页面读不到响应里的元信息。
+// 但当时的 `Access-Control-Allow-Origin: *` + 无鉴权 = **任何被访问过的网页**都能 POST 到这个
+// 本机端点（写入虽被批次目录围栏限制，可它仍能把图片/任意字节写进用户的 grok-output 批次目录，
+// 并读回路径/哈希/宽高）。三道门分别堵三件事：
+//   ① 白名单回显：只有真的会用到的源（grok.com / x.ai）能读到响应；别人的请求不回 ACAO。
+//   ② batch nonce：跨源页面拿不到 nonce 就 403 —— 挡住"任意网页"这条路（见 nonce 生成注释）。
+//   ③ 魔术字节：确实像 PNG/JPEG/GIF/WebP 才收，别把任意载荷写成"图"。
+
+/**
+ * 允许读取 /dvp/grok/save 响应的源。集中定义在这里，断言直接读它（tools/verify-grok-bytes.mjs）。
+ *
+ * 为什么是这两个域：取图必须发生在**已登录 grok.com 的页面上下文**里（签名 URL 绑定会话，
+ * 见 README「Grok 出图的实测硬约束」），所以实际会 POST 回来的只有 Grok 自己与它的 x.ai 同族域。
+ * 通配子域（*.grok.com / *.x.ai）而不是逐个白名单，是因为 assets.grok.com / grok.com 之间
+ * 跳转时页面 origin 会变，逐个列会漏 —— 而这两个域都是同一家、同一份登录态。
+ *
+ * 刻意**不**收 127.0.0.1 / localhost：面板与宿主是同源（同源请求不需要 CORS），
+ * 收了反而等于把口子还给"本机上任何别的 HTTP 服务"。
+ * 运维需要临时加源：DVP_GROK_SAVE_ORIGINS="https://a.example,https://b.example"（只按 origin 精确匹配）。
+ */
+export const GROK_SAVE_ALLOWED_ORIGINS = Object.freeze(['https://grok.com', 'https://x.ai'])
+
+const GROK_SAVE_ALLOWED_HEADERS = 'Content-Type, X-DVP-Nonce'
+
+/** 请求里能带 nonce 的三个位置：JSON 体的 body.nonce、查询参数 ?nonce=、请求头 X-DVP-Nonce。 */
+export const GROK_SAVE_NONCE_HEADER = 'x-dvp-nonce'
+
+/** 环境变量里那种"逗号分隔的额外源"（运维口），坏值一律忽略而不是抛。 */
+function extraAllowedOrigins(env) {
+  const raw = typeof (env && env.DVP_GROK_SAVE_ORIGINS) === 'string' ? env.DVP_GROK_SAVE_ORIGINS : ''
+  const out = []
+  for (const piece of raw.split(',')) {
+    const value = piece.trim().toLowerCase()
+    if (value === '') continue
+    try {
+      const parsed = new URL(value)
+      if (parsed.origin !== 'null' && parsed.origin !== undefined) out.push(parsed.origin)
+    } catch { /* 不是合法 origin 就当没写 */ }
+  }
+  return out
+}
+
+/** 把 origin 解成 { protocol, hostname }（小写）；解不出（不是合法 URL）返回 null。 */
+function parseOrigin(value) {
+  try {
+    const url = new URL(value)
+    return { protocol: String(url.protocol || '').toLowerCase(), hostname: String(url.hostname || '').toLowerCase() }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Origin 是不是我们认得的那种"grok 网页"。大小写不敏感（origin 规范上是小写的）。
+ *
+ * 判据是**解析后的 hostname**，不是字符串前后缀 —— 前后缀那种写法会放过 `grok.com.evil.example`
+ * 这类伪装域（它以 `.grok.com` 之外的形式巧妙地躲过 endsWith 检查）与 `notgrok.com`。
+ * 端口不参与判断：`https://grok.com:443` 与 `https://grok.com` 是同一个源。
+ *
+ * **没有 Origin 头 = 放行**（返回 true）。浏览器发的每一个跨源请求都带 Origin，这是规范行为；
+ * 不带 Origin 的只有两类：同源请求（面板 → 宿主，本来就不受 CORS 约束）、以及 node/curl 这类
+ * 非浏览器调用方。这两类的边界不靠 CORS —— 靠 nonce 门与批次目录围栏（见「三道门」注释）。
+ * 反过来，如果这里把"没有 Origin"当白名单外拒掉，面板自己的同源调用与宿主侧脚本会一起失效。
+ */
+export function isAllowedGrokSaveOrigin(origin, env) {
+  const raw = origin === undefined || origin === null ? '' : String(origin).trim()
+  if (raw === '') return true
+  const parsed = parseOrigin(raw)
+  const extra = extraAllowedOrigins(env === undefined ? process.env : env)
+  if (parsed === null) {
+    // 解不出 URL（`null` / 畸形值）：只认环境变量里显式写下的精确串。
+    return extra.includes(raw.toLowerCase())
+  }
+  // 只认 https（白名单里两个域都是 https）：`http://grok.com` 这种协议降级不认。
+  if (parsed.protocol !== 'https:') return false
+  if (GROK_SAVE_ALLOWED_ORIGINS.some((allowed) => {
+    const base = parseOrigin(allowed)
+    if (base === null) return false
+    return parsed.hostname === base.hostname || parsed.hostname.endsWith('.' + base.hostname)
+  })) return true
+  return extra.includes(raw.toLowerCase())
+}
+
+/**
+ * 这一条响应的 CORS 头。
+ *
+ * 关键：**只回显请求自己的 Origin**，不再回 `*` —— 回 `*` 等于告诉浏览器"任何页面都能读这条响应"。
+ * 白名单外的源回空对象（没有 ACAO，浏览器就不放行读取；写操作也被下面的 nonce 门挡在 403）。
+ * `Vary: Origin` 必须带：响应体/头随 Origin 变，别让任何中间缓存把"给 A 源的响应"发给 B 源。
+ */
+export function grokSaveCorsHeaders(origin, env) {
+  if (!isAllowedGrokSaveOrigin(origin, env)) return {}
+  const echoed = origin === undefined || origin === null ? '' : String(origin).trim()
+  // 没有 Origin（同源调用 / 非浏览器调用方）⇒ 不带 ACAO：本来就不需要，带了反而多一句话。
+  if (echoed === '') return { Vary: 'Origin' }
+  return {
+    'Access-Control-Allow-Origin': echoed,
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    Vary: 'Origin',
+  }
+}
+
+/** 白名单外的源：不回任何 CORS 头，但仍是可读的 JSON 403（跨源 JS 读不到，本机/无 Origin 调用方读得到）。 */
+function grokSaveDenyJson(res, status, message) {
+  sendJson(res, status, { ok: false, error: message })
+}
+
+// 一次性 nonce 的台账。作用域是**进程内**，键是 batchId：
+//   * 生成：POST/PUT /dvp/grok/plan 建批次（或续做）时新生成一个，回在响应里、写进 plan.json，
+//     宿主把它一起交给会话（driver.md / 面板派发请求），会话里的 agent 在执行取图那一步把它带上。
+//   * 校验：/dvp/grok/save 先按 batchId 查内存，内存没有（宿主重启过）再读该批次目录里的 plan.json。
+//   * 上限 500 条，超了挤掉最早的一条；进程重启后内存台账清空，靠 plan.json 兜底。
+const GROK_SAVE_NONCE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const GROK_SAVE_NONCE_MAX = 500
+const grokSaveNonces = new Map()
+
+/** 给一个批次发新 nonce（32 字节随机 → 64 位十六进制）。批次重发 ⇒ 旧 nonce 立刻作废。 */
+function issueGrokBatchNonce(batchId) {
+  const nonce = randomBytes(32).toString('hex')
+  grokSaveNonces.set(batchId, { nonce, at: Date.now() })
+  const now = Date.now()
+  for (const [key, item] of grokSaveNonces) {
+    if (now - item.at > GROK_SAVE_NONCE_TTL_MS) grokSaveNonces.delete(key)
+  }
+  while (grokSaveNonces.size > GROK_SAVE_NONCE_MAX) {
+    const oldest = grokSaveNonces.keys().next()
+    if (oldest.done) break
+    grokSaveNonces.delete(oldest.value)
+  }
+  return nonce
+}
+
+/** 定长比较，别让 nonce 的长度/前缀差异从耗时里漏出去。 */
+export function grokSaveNonceEquals(expected, provided) {
+  const a = Buffer.from(String(expected), 'utf8')
+  const b = Buffer.from(String(provided), 'utf8')
+  if (a.length === 0 || b.length === 0) return false
+  const salt = randomBytes(16)
+  const hashA = createHash('sha256').update(salt).update(a).digest()
+  const hashB = createHash('sha256').update(salt).update(b).digest()
+  return timingSafeEqual(hashA, hashB)
+}
+
+/**
+ * nonce 校验是否强制。默认**强制**；DVP_GROK_SAVE_ALLOW_ANON=1 是给"本机无浏览器调用方"
+ * 的逃生口（例如宿主侧脚本直接把图 POST 上来），要在环境里显式打开才算数。
+ */
+export function grokSaveNonceRequired(env) {
+  const source = env === undefined ? process.env : env
+  return String((source && source.DVP_GROK_SAVE_ALLOW_ANON) || '') !== '1'
+}
+
+/**
+ * 这个批次该用的 nonce：内存台账优先（进程内最新发出的那次），内存没有（宿主重启过）就读
+ * 该批次目录 plan.json 里记着的那一个。两处都没有 ⇒ 空串 ⇒ 一律 403（宁可拒，也不放行）。
+ */
+async function expectedGrokSaveNonce(batchId, readPlanNonce) {
+  const known = grokSaveNonces.get(batchId)
+  if (known !== undefined && typeof known.nonce === 'string' && known.nonce !== '') return known.nonce
+  return await readPlanNonce()
+}
+
+/**
+ * 请求体是不是"真图片"（只认魔数，不看 content-type：页面直传时 content-type 常常是
+ * application/octet-stream）。返回 .ext 便于跟 ext 参数对不上时留个话头，认不出返回 ''。
+ *
+ * 这是三道门里最弱的一道（魔数能被伪造），它的定位是"别把明显不是图的东西写成图"，
+ * 不是鉴权 —— 鉴权是 nonce 那道。
+ */
+export function imageFileSignature(bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 12) return ''
+  const head = bytes.toString('binary')
+  if (head.startsWith('\x89PNG\r\n\x1a\n')) return '.png'
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return '.jpg'
+  if (head.startsWith('GIF87a') || head.startsWith('GIF89a')) return '.gif'
+  if (head.startsWith('RIFF') && head.slice(8, 12) === 'WEBP') return '.webp'
+  return ''
+}
+
 // ── Grok 驱动清单（写给人看，也写给会话里的 agent 看）────────────────────────
 
 // 导出只为离线断言：tools/verify-grok-bytes.mjs 要直接验"这份清单里没有 base64 搬运通道"，
@@ -309,6 +492,10 @@ export function driverDoc(plan) {
   lines.push('')
   lines.push('- 生成时间：' + plan.createdAt)
   if (plan.batchId) lines.push('- 批次 ID：' + plan.batchId + '（重试这一批时把它回传给 /dvp/grok/plan，写回同一目录）')
+  if (plan.saveNonce) {
+    lines.push('- 存图 nonce：`' + plan.saveNonce + '` —— 往 /dvp/grok/save 存图时必须带上它（`?nonce=` 或请求头 `X-DVP-Nonce`），')
+    lines.push('  否则 403。非白名单来源（grok.com / x.ai 之外）的页面同样被拒：这一步挡的是"任意网页往本机端点写图"。')
+  }
   lines.push('- 目标站点：' + plan.grokUrl)
   lines.push('- 批次条数：' + plan.count)
   lines.push('- 图片落地：' + plan.dir)
@@ -342,8 +529,10 @@ export function driverDoc(plan) {
   }
   lines.push('4. 每拿到一张图，在**页面上下文里**把成图字节原样 `POST /dvp/grok/save?index=<序号>&slug=<slug>'
     + (plan.batchId ? '&batch=' + plan.batchId : '')
+    + (plan.saveNonce ? '&nonce=' + plan.saveNonce : '')
     + '`（raw bytes，宿主回 {file,bytes,sha256,width,height} 元信息即算落盘成功；'
     + (plan.batchId ? '同一批的图必须带同一个 batch，才会进同一目录；' : '')
+    + (plan.saveNonce ? 'nonce 必须是本清单里那一个，错了直接 403；' : '')
     + '图片内容/base64 一律不进会话文本）。')
   lines.push('5. 全部投完检查 ' + path.join(plan.dir, 'ledger.json') + ' 对账。')
   lines.push('')
@@ -1272,9 +1461,13 @@ export async function apply(ctx, rawConfig = {}) {
       sourceChars = sourceText.length
     }
     const options = sanitizeGrokOptions(body.options)
+    // 每批一个新 nonce：写进 plan.json（宿主重启后仍能校验）、回给调用方、进 driver.md 与面板派发请求。
+    // 重发同一批次（PUT/POST 带 batchId）会换新 nonce ⇒ 旧的那把立刻作废。
+    const saveNonce = issueGrokBatchNonce(batchId)
     const plan = {
       createdAt: new Date().toISOString(),
       batchId,
+      saveNonce,
       grokUrl: typeof body.grokUrl === 'string' && body.grokUrl !== '' ? body.grokUrl : 'https://grok.com/',
       dir,
       count: entries.length,
@@ -1297,6 +1490,9 @@ export async function apply(ctx, rawConfig = {}) {
       ok: true,
       ...grokBatchInfo(root, batchId, dir),
       count: plan.count,
+      // nonce 交给调用方（面板 → 派发请求 → 会话里的 agent → 页面内 POST 时带上）。
+      // 它只在这条批次通道里有效，不是账号凭据；但除本响应与批次 plan.json 外不再另发一份。
+      saveNonce,
       ...(options === undefined ? {} : { options }),
       ...(sourceFile === '' ? {} : { sourceFile, sourceChars }),
     })
@@ -1335,6 +1531,9 @@ export async function apply(ctx, rawConfig = {}) {
             return
           }
           const plan = JSON.parse(await fsp.readFile(planFile, 'utf8'))
+          // nonce 只沿"派发"那条线走（POST/PUT 响应 → 会话 → 页面内 POST）：GET 是跨源读得到的
+          // 只读端点，把 nonce 放在这里等于让任意网页读它 —— 那 nonce 就白加了。
+          if (plan !== null && typeof plan === 'object') delete plan.saveNonce
           const batches = scanGrokBatches(root).sort((a, b) => b.mtime - a.mtime).map((item) => item.batchId)
           sendJson(res, 200, { ok: true, ...info, plan, batches })
           return
@@ -1357,17 +1556,27 @@ export async function apply(ctx, rawConfig = {}) {
       // 浏览器页面上下文与宿主之间的字节直传通道。响应体**只有元信息**
       // （路径/字节数/哈希/宽高/状态），图片内容任何形态（含 base64）都不经会话文本：
       // 1 MiB 图 ≈ 140 万字符 base64，既爆上下文又会被工具结果上限截坏。
-      // 所以这一条路由单独放开 CORS：
-      //   * 不放，页面内直传就永远读不回元信息，agent 只能把字节搬回会话来 POST —— 正是要防的绕行；
-      //   * 文件路径/账本本来就能被 GET /dvp/grok/plan 无鉴权读到，写入本来就能被 no-cors POST 触达，
-      //     ACAO:* 只是把"这一条响应的元信息"暴露给浏览器里已打开的页面，没有扩大能写的位置
-      //     （仍被批次目录围栏挡在 grok-output/<batchId>/ 里）。
-      const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS' }
+      // 这一条路由必须回 CORS（不放，页面内直传就读不回元信息，agent 只能把字节搬回会话来 POST
+      // —— 正是要防的绕行），但不再是 `*`：**只回显白名单内请求自己的 Origin**，白名单外的源
+      // 连响应都读不到（写操作另有 nonce 门，见文件上方「三道门」注释）。
+      //
+      // 响应头口径（三道门的可见结果，tools/verify-grok-bytes.mjs 逐条断言）：
+      //   * 白名单外的源 ⇒ 403 且**一个 CORS 头都不回**（跨源 JS 连错误信息都读不到）；
+      //   * 白名单内的源但 nonce 错/缺 ⇒ 403，仍回 CORS 头 —— 让页面能读到"nonce 不对"这句话
+      //     （不这么做，agent 只能看到一句 "Failed to fetch"，分不清是路由不通还是被拒），
+      //     no-CORS 的伪造请求则因拿不到 nonce 而永远写不进任何字节。
+      const cors = grokSaveCorsHeaders(req.headers.origin)
+      const deny = (status, message, headers) => sendJson(res, status, { ok: false, error: message }, headers)
       try {
+        if (Object.keys(cors).length === 0) {
+          deny(403, '来源未被允许：/dvp/grok/save 只接受白名单内的页面来源（' + GROK_SAVE_ALLOWED_ORIGINS.join(' / ') + ' 及其子域）')
+          return
+        }
         if (req.method === 'OPTIONS') {
+          // 预检：把 X-DVP-Nonce 也放进 Allow-Headers（否则非简单请求的预检会被浏览器拦掉）。
           res.writeHead(204, {
             ...cors,
-            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Allow-Headers': GROK_SAVE_ALLOWED_HEADERS,
             'Access-Control-Max-Age': '600',
             'Content-Length': '0',
           })
@@ -1375,7 +1584,7 @@ export async function apply(ctx, rawConfig = {}) {
           return
         }
         if (req.method !== 'POST') {
-          sendJson(res, 405, { ok: false, error: '方法不允许' }, cors)
+          deny(405, '方法不允许', cors)
           return
         }
         const contentType = String(req.headers['content-type'] || '').toLowerCase()
@@ -1394,7 +1603,7 @@ export async function apply(ctx, rawConfig = {}) {
           } else if (typeof body.url === 'string' && /^https?:\/\//i.test(body.url)) {
             const response = await fetch(body.url)
             if (!response.ok) {
-              sendJson(res, 502, { ok: false, error: '下载失败 HTTP ' + response.status }, cors)
+              deny(502, '下载失败 HTTP ' + response.status, cors)
               return
             }
             bytes = Buffer.from(await response.arrayBuffer())
@@ -1404,7 +1613,7 @@ export async function apply(ctx, rawConfig = {}) {
             else if (responseContentType.includes('png')) body.ext = '.png'
             source = body.url
           } else {
-            sendJson(res, 400, { ok: false, error: '需要 base64 或 url；或把图片字节原样作请求体走 raw 模式（批次/序号/slug 放 URL 参数 ?batch=&index=&slug=）' }, cors)
+            deny(400, '需要 base64 或 url；或把图片字节原样作请求体走 raw 模式（批次/序号/slug 放 URL 参数 ?batch=&index=&slug=）', cors)
             return
           }
         } else {
@@ -1421,7 +1630,7 @@ export async function apply(ctx, rawConfig = {}) {
           bytes = await readRaw(req, 48 * 1024 * 1024)
           source = 'raw-bytes'
           if (bytes.length === 0) {
-            sendJson(res, 400, { ok: false, error: '请求体为空：raw 模式要把图片字节原样放进请求体（生成中取到的占位图就是 0 字节，等流式收尾再取）' }, cors)
+            deny(400, '请求体为空：raw 模式要把图片字节原样放进请求体（生成中取到的占位图就是 0 字节，等流式收尾再取）', cors)
             return
           }
           if (typeof body.ext !== 'string' || body.ext === '') {
@@ -1444,12 +1653,9 @@ export async function apply(ctx, rawConfig = {}) {
         // 绝不退回 grok-output 根目录 —— 那正是"新批次盖掉旧批次图"的老毛病。
         const wanted = wantBatch(body)
         if (!wanted.ok) {
-          sendJson(res, 400, {
-            ok: false,
-            error: wanted.legacyAlias === true
-              ? 'legacy 是旧版平铺布局的只读别名，不能写入；请传具体 batchId'
-              : 'batchId 非法：只能是单个目录名（不含 / \\ : 与 ..）',
-          }, cors)
+          deny(400, wanted.legacyAlias === true
+            ? 'legacy 是旧版平铺布局的只读别名，不能写入；请传具体 batchId'
+            : 'batchId 非法：只能是单个目录名（不含 / \\ : 与 ..）', cors)
           return
         }
         let batchId = wanted.id === BATCH_ROOT ? '' : wanted.id
@@ -1459,7 +1665,7 @@ export async function apply(ctx, rawConfig = {}) {
           // 存图是"往已有批次里放结果"：批次得先存在。批次 ID 写错时宁可 404，
           // 也不要凭空建一个只有图片、没有 plan.json 的孤儿目录。
           if (!existsSync(dir)) {
-            sendJson(res, 404, { ok: false, error: '批次不存在：' + batchId + '（先用 /dvp/grok/plan 建批次）' }, cors)
+            deny(404, '批次不存在：' + batchId + '（先用 /dvp/grok/plan 建批次）', cors)
             return
           }
         } else {
@@ -1475,7 +1681,43 @@ export async function apply(ctx, rawConfig = {}) {
           }
         }
         if (!allowAny(dir)) {
-          sendJson(res, 403, { ok: false, error: '批次目录越界' }, cors)
+          deny(403, '批次目录越界', cors)
+          return
+        }
+        // ── 门②：batch nonce。缺/错一律 403，且**在 mkdir 之前**判 —— 被拒的请求不在盘上留痕迹。
+        if (grokSaveNonceRequired()) {
+          const provided = String(
+            (isJson && typeof body.nonce === 'string' ? body.nonce : '')
+            || query(req.url, 'nonce')
+            || req.headers[GROK_SAVE_NONCE_HEADER]
+            || '',
+          ).trim()
+          const expected = await expectedGrokSaveNonce(batchId, async () => {
+            try {
+              const parsed = JSON.parse(await fsp.readFile(path.join(root, batchId, 'plan.json'), 'utf8'))
+              return parsed && typeof parsed.saveNonce === 'string' ? parsed.saveNonce : ''
+            } catch {
+              return '' // 没有 plan.json（批次刚现建）⇒ 只能靠内存台账
+            }
+          })
+          if (!grokSaveNonceEquals(expected, provided)) {
+            deny(403, expected === ''
+              // 内存台账与 plan.json 都没有这个批次的 nonce（宿主刚重启、批次目录里也没记着）：
+              // 不放行，给一句能照着做的错误。
+              ? 'nonce 无法校验：先 POST /dvp/grok/plan 建批次（或续做该批次）拿 saveNonce'
+              : provided === ''
+                ? '缺少 nonce：存图必须带本批次的 saveNonce（?nonce= 或请求头 X-DVP-Nonce，见该批次 driver.md / plan.json）'
+                : 'nonce 不正确：它不是本批次当前有效的 saveNonce（重新建批次会换新 nonce）', cors)
+            return
+          }
+        }
+        // ── 门③：魔术字节。只认魔数（PNG/JPEG/GIF/WebP），不认扩展名 —— raw 模式下页面直传的
+        // content-type 常常是 application/octet-stream，扩展名也常常是默认的 .png。
+        // 拦的是"把别的载荷当图写进批次目录"，不是鉴权（鉴权在门②）。
+        const signature = imageFileSignature(bytes)
+        if (signature === '') {
+          deny(415, '不是图片字节：只接受 PNG/JPEG/GIF/WebP（按魔数判断，不看扩展名与 content-type）；'
+            + '请求体前 16 字节是 ' + bytes.subarray(0, 16).toString('hex'), cors)
           return
         }
         await fsp.mkdir(dir, { recursive: true })
@@ -1505,6 +1747,9 @@ export async function apply(ctx, rawConfig = {}) {
           bytes: bytes.length,
           sha256,
           source,
+          // 魔数认出来的真实封装（.png/.jpg/.gif/.webp）。只记账、**不改**调用方给的 ext：
+          // 改扩展名会动到落盘文件名，而文件名是调用方与账本对齐的锚点（旧调用方还可能给 .jpeg 这类等价写法）。
+          signature,
           note: typeof body.note === 'string' ? body.note.slice(0, 300) : '',
         })
         ledger.updatedAt = new Date().toISOString()
@@ -1524,7 +1769,7 @@ export async function apply(ctx, rawConfig = {}) {
           ledger: ledgerFile,
         }, cors)
       } catch (err) {
-        sendJson(res, 500, { ok: false, error: String((err && err.message) || err) }, cors)
+        deny(500, String((err && err.message) || err), cors)
       }
     },
   }))

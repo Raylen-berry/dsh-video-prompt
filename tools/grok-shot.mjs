@@ -164,7 +164,7 @@ export function extFromContentType(contentType, fallback = '.png') {
  *     旧版"宿主不可用就把 base64 分块交回会话再写盘"的兜底已于 2026-09-15 删除，
  *     兜底改为盘到盘通道直接落批次目录，会话里只走"路径 + 字节数 + 哈希 + 状态"。
  */
-export function grokRecipe(entries, outDir, batchId = '') {
+export function grokRecipe(entries, outDir, batchId = '', saveNonce = '') {
   const batchDir = batchId === '' ? outDir : outDir + '/' + batchId
   const steps = [
     '1. browser_open(use:"edge", url:"https://grok.com/") —— 用用户的 Edge 登录态；若未登录或出现人机验证，停下来叫人，不要尝试绕过。',
@@ -175,7 +175,7 @@ export function grokRecipe(entries, outDir, batchId = '') {
     steps.push(
       `3.${i + 1} 把第 ${entry.index} 条提示词（${entry.chars} 字）整段贴进输入框：browser_type(ref=<composer>, text=<完整提示词>)，然后点 Submit（或 Enter）。`,
       `3.${i + 1}b 等待出图：先等页面底部出现 "Stop model response" 再等它消失，或轮询到 "Download" / "Make video" 工具条出现。**生成中不要取图** —— 那时节点是占位，fetch 回来是 0 字节。单条超时 120s 记失败并继续下一条。`,
-      `3.${i + 1}c 取图（字节直传，主路径）：browser_eval 在页面上下文里跑一段 JS：fetch(img.currentSrc,{credentials:"include"}) → arrayBuffer，校验 byteLength>0，再把这段字节**原样** POST 给宿主 \`<宿主基址>/dvp/grok/save?index=${entry.index}&slug=${entry.slug}${batchId ? '&batch=' + batchId : ''}&ext=<按响应 content-type 选>)\`（Content-Type: application/octet-stream）。这段 JS 的**返回值只能是宿主回的那一小段元信息 JSON**：{ok,status:"saved",file,bytes,sha256,width,height}，落到 ${batchDir}/${name}.<ext>。❌ 图片内容本身（base64 或其它任何编码）不得出现在 browser_eval 的返回值、命令参数或聊天文本里。`,
+      `3.${i + 1}c 取图（字节直传，主路径）：browser_eval 在页面上下文里跑一段 JS：fetch(img.currentSrc,{credentials:"include"}) → arrayBuffer，校验 byteLength>0，再把这段字节**原样** POST 给宿主 \`<宿主基址>/dvp/grok/save?index=${entry.index}&slug=${entry.slug}${batchId ? '&batch=' + batchId : ''}${saveNonce ? '&nonce=' + saveNonce : ''}&ext=<按响应 content-type 选>)\`（Content-Type: application/octet-stream）。这段 JS 的**返回值只能是宿主回的那一小段元信息 JSON**：{ok,status:"saved",file,bytes,sha256,width,height}，落到 ${batchDir}/${name}.<ext>。❌ 图片内容本身（base64 或其它任何编码）不得出现在 browser_eval 的返回值、命令参数或聊天文本里。`,
       `3.${i + 1}d 兜底（宿主不可达 / 路由 404 时）：**先把 GET <宿主基址>/dvp/state 探一次**确认宿主确实不通，再走盘到盘通道 —— \`node tools/scan-cache.mjs --bytes <上一步 blob.size（只是个数字）> --out ${batchDir} --name ${name}.jpg\`，字节从浏览器磁盘缓存直接进本批目录，工具会验 JPEG/PNG 签名并回报落盘路径；随后 \`Get-FileHash\` 量出 sha256。对账里要写明**为什么走了兜底**（如"宿主 404"）与 {file,bytes,sha256}。⚠️ 不许退回旧做法"把 base64 分块交回会话再写盘"（已删除的通道，1 MiB 图 ≈ 140 万字符，必爆上下文且会被结果上限截坏）。`,
       `3.${i + 1}e 最后一条路（scan-cache 也捞不到时）：请用户在真实浏览器里点一次 Download，用 \`node tools/watch-downloads.mjs --out ${batchDir}\` 接住 —— 同样是盘到盘，只回报路径与账本。`,
     )
@@ -230,7 +230,18 @@ async function main() {
     console.log('  ' + String(entry.index).padStart(2, '0') + '. ' + entry.slug + '  (' + entry.chars + ' 字)')
   })
   if (args.printGrokDoc) {
-    console.log('\n──── 给浏览器插件的操作清单 ────\n' + grokRecipe(entries, outDir, args.batch))
+    // nonce（/dvp/grok/save 的门②）：本脚本不建批次（批次是宿主 POST /dvp/grok/plan 建的），
+    // 所以钥匙从批次目录的 plan.json 里读 —— 读了就把它写进取图命令，agent 照抄即可。
+    // 读不到（还没建批次 / 旧批次没有这个字段）就留空，配方里也不会出现 nonce 字样。
+    let saveNonce = ''
+    const planFileInBatch = path.join(outDir, 'plan.json')
+    if (existsSync(planFileInBatch)) {
+      try {
+        const parsed = JSON.parse(await fsp.readFile(planFileInBatch, 'utf8'))
+        if (parsed !== null && typeof parsed.saveNonce === 'string') saveNonce = parsed.saveNonce
+      } catch { /* plan.json 坏了不影响出配方 */ }
+    }
+    console.log('\n──── 给浏览器插件的操作清单 ────\n' + grokRecipe(entries, outDir, args.batch, saveNonce))
   }
 }
 

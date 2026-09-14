@@ -603,15 +603,18 @@ window.__ModuleLoader__.load({
     }
 
     // ───────────────────────────────────────────────────── Grok 出图派发请求 ──────
-    function buildGrokRequest(items, planDir, source, options, docs, processDir, batchId) {
+    function buildGrokRequest(items, planDir, source, options, docs, processDir, batchId, saveNonce) {
       var images = chosenOf(items, 'image')
       var lines = []
       lines.push('接着上一步的图片提示词，用浏览器插件驱动我的 Edge，在 Grok 里出图。')
       lines.push('')
       lines.push('- 提示词批次目录：' + planDir)
       if (batchId) lines.push('- 批次 ID：' + batchId + '（存图时回传它，保证这一批的图进同一个目录）')
+      // nonce 是存图那道门的钥匙：宿主建批次时发下来，agent 取图时原样带上，缺了/错了直接 403。
+      // 它只对 /dvp/grok/save 的这一批有效，不是账号凭据；但**只**沿这条派发线走，不要写进别处。
+      if (saveNonce) lines.push('- 存图 nonce：' + saveNonce + '（POST /dvp/grok/save 时必须带上 `?nonce=` 或请求头 `X-DVP-Nonce`，否则 403）')
       lines.push('- 待出图：' + images.length + ' 张')
-      lines.push('- 落盘路由：POST /dvp/grok/save（在页面上下文里把成图字节**原样直接 POST**（raw bytes，批次/序号/slug 走 URL 参数' + (batchId ? '，batch=' + batchId : '') + '）；宿主只回 {file,bytes,sha256,width,height} 元信息。图片字节/base64 一律不进会话文本）')
+      lines.push('- 落盘路由：POST /dvp/grok/save（在页面上下文里把成图字节**原样直接 POST**（raw bytes，批次/序号/slug' + (batchId ? '/nonce' : '') + ' 走 URL 参数' + (batchId ? '，batch=' + batchId : '') + (saveNonce ? '，nonce=' + saveNonce : '') + '）；宿主只回 {file,bytes,sha256,width,height} 元信息。图片字节/base64 一律不进会话文本）')
       if (processDir) lines.push('- 过程目录：' + processDir + '（草稿、临时截图、取图中间文件写这里）')
       var optLines = grokOptionLines(options)
       for (var oi = 0; oi < optLines.length; oi++) lines.push(optLines[oi])
@@ -620,7 +623,7 @@ window.__ModuleLoader__.load({
       lines.push('1. browser_open(use:"edge", url:"https://grok.com/")，用我的登录态。')
       lines.push('2. 未登录、有人机验证、或提示额度用尽 —— 停下来告诉我，不要尝试绕过。')
       lines.push('3. 逐条把图片提示词贴进 Grok 输入框发送，等新图出现（单条超时 120 秒就记失败并继续）。')
-      lines.push('4. 每拿到一张图就在页面上下文里把字节直接 POST /dvp/grok/save 落盘（宿主回 file/bytes/sha256 即成功；取不到字节时的兜底也**只能盘到盘**：scan-cache 或让用户点 Download 后 watch-downloads --out 接住，文件名用 `<序号>-<slug>.png`' + (batchId ? '，URL 参数带 batch=' + batchId : '') + '）。')
+      lines.push('4. 每拿到一张图就在页面上下文里把字节直接 POST /dvp/grok/save 落盘（宿主回 file/bytes/sha256 即成功；取不到字节时的兜底也**只能盘到盘**：scan-cache 或让用户点 Download 后 watch-downloads --out 接住，文件名用 `<序号>-<slug>.png`' + (batchId ? '，URL 参数带 batch=' + batchId : '') + (saveNonce ? '，并带上上面的 nonce（缺了/错了直接 403）' : '') + '）。')
       lines.push('5. 全部投完给我一份对账：成功 N 张、失败 M 张、失败原因、图片实际路径。')
       lines.push('')
       lines.push('待出图清单：')
@@ -1054,6 +1057,7 @@ window.__ModuleLoader__.load({
             }).then(function (res) {
               var dir = (res && res.ok && res.dir) ? res.dir : planDir
               var batchId = (res && res.ok && res.batchId) ? res.batchId : ''
+              var saveNonce = (res && res.ok && res.saveNonce) ? res.saveNonce : ''
               if (!res || res.ok !== true) setError('批次落盘失败：' + ((res && res.error) || '未知错误'))
               else setNote('已建 Grok 批次：' + res.count + ' 条 → ' + dir + (res.sourceFile ? ' · 来源文本 → ' + res.sourceFile : '') + (processDir ? ' · 过程目录 → ' + processDir : ''))
               // 请求里只带材料引用（路径 / 字数 / 批次 ID），正文一个字都不进请求
@@ -1064,7 +1068,7 @@ window.__ModuleLoader__.load({
                   chars: (res && res.sourceChars) || sourceChars || sourceText.length,
                 }
                 : null
-              var text = buildGrokRequest(imagesOnly, dir, sourceRef, grokOpts, docsOnly, processDir, batchId)
+              var text = buildGrokRequest(imagesOnly, dir, sourceRef, grokOpts, docsOnly, processDir, batchId, saveNonce)
               var result = dispatchToComposer(text)
               if (!result.ok) {
                 void copyText(text).then(function (copied) {

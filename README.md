@@ -276,11 +276,11 @@ node "<DSH 安装目录>/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --prof
 
 | 调用 | 行为 |
 | --- | --- |
-| `POST/PUT /dvp/grok/plan`（不传批次身份） | 新建批次目录，响应回 `batchId` |
-| `POST/PUT /dvp/grok/plan` + `batchId`（或 `batch`/`dir`） | 续做/重试这一批，写回同一目录 |
-| `GET /dvp/grok/plan` | 最新一批（`dir`/`plan` 字段名不变，另带 `batchId`/`batches`） |
+| `POST/PUT /dvp/grok/plan`（不传批次身份） | 新建批次目录，响应回 `batchId` **与 `saveNonce`**（存图那把钥匙，见「Grok 出图的实测硬约束」三道门） |
+| `POST/PUT /dvp/grok/plan` + `batchId`（或 `batch`/`dir`） | 续做/重试这一批，写回同一目录，并**换发**新 `saveNonce`（旧的立刻作废） |
+| `GET /dvp/grok/plan` | 最新一批（`dir`/`plan` 字段名不变，另带 `batchId`/`batches`；`plan` 里**不含** `saveNonce`） |
 | `GET /dvp/grok/plan?batch=<id>` | 指定批次；`?batch=legacy` = 旧版平铺布局 |
-| `POST /dvp/grok/save` + `batch`（raw bytes 请求体） | 图落进那一批；不传则进最新一批。响应只有元信息，字节不回吐 |
+| `POST /dvp/grok/save` + `batch` + `nonce`（raw bytes 请求体） | 图落进那一批；不传 batch 则进最新一批。nonce 缺/错 403、非图片字节 415。响应只有元信息，字节不回吐 |
 | 旧布局 `<mediaRoot>/grok-output/plan.json` | 仍读得到（算一个历史批次），但**不再被写入** |
 
 拿不准批次时：`GET /dvp/grok/plan` 看 `batchId` 与 `batches`，拿 `batchId` 去和 `ledger.json` 对齐。
@@ -444,7 +444,7 @@ node tools/sync-servable.mjs    # 改完 client.js 后同步预览页那一份�
 （`Stop model response` 消失 / 出现 `Download`·`Make video` 工具条）再去读，
 否则会拿到空壳。`tools/grok-shot.mjs` 的 `grokRecipe()` 已按这个结论写死步骤。
 存图时**带上批次 ID**（`POST /dvp/grok/save` 的 `batch` 查询参数，或 JSON 体的 `batchId`），
-图才会进它所属的那一批目录。
+并带上该批次的 **nonce**（建批次时响应里的 `saveNonce`），图才会进它所属的那一批目录。
 
 `/dvp/grok/save` 现在有**两种请求体**：
 
@@ -458,14 +458,27 @@ node tools/sync-servable.mjs    # 改完 client.js 后同步预览页那一份�
 raw 直传下请求体里的 base64 字符数是 **0**，会话只收路径/字节数/sha256/宽高/状态
 （`tools/verify-grok-bytes.mjs` 就是这么量化的：同样一张 1 MiB 假图，旧路径会话文本 1,398,527 字符、
 其中 base64 1,398,444；新路径元信息 211 字符、其中 base64 **0**）。
-这一条路由因此单独放开了 CORS（`Access-Control-Allow-Origin: *`）——不放，页面内直传就永远读不回元信息，
-agent 只能把字节搬回会话里再 POST，正是要防的绕行。写入位置仍被批次目录围栏挡在 `grok-output/<batchId>/` 里。
+这一条路由必须回 CORS——不放，页面内直传就永远读不回元信息，agent 只能把字节搬回会话里再 POST，
+正是要防的绕行。但**不是** `Access-Control-Allow-Origin: *`：那等于告诉浏览器"任何被访问过的网页
+都能读写这条本机端点"。现在这一条路由有三道门（`index.js` 里集中定义，`tools/verify-grok-bytes.mjs`
+逐条断言正反两面）：
+
+| 门 | 口径 | 被拒的样子 |
+| --- | --- | --- |
+| ① CORS 白名单回显 | 只回显**请求自己的 Origin**（`https://grok.com`、`https://x.ai` 及其子域；判据是解析后的 hostname，不是字符串后缀——`grok.com.evil.example` 这类伪装域不算），并带 `Vary: Origin` | 白名单外的源**一个 CORS 头都不回** + 403（跨源 JS 连错误信息都读不到，写也写不进去） |
+| ② 批次 nonce | 建批次（`POST/PUT /dvp/grok/plan`）时宿主发一把随机 nonce，回在响应里、写进该批 `plan.json`、随驱动清单与面板派发请求交给会话；存图时用 `?nonce=` 或请求头 `X-DVP-Nonce` 带上，缺/错一律 403 | 403；重发同一批会换新 nonce，旧的那把立刻作废。`GET /dvp/grok/plan` **不回吐** nonce（那是跨源读得到的只读端点） |
+| ③ 图片魔术字节 | 按魔数收 PNG/JPEG/GIF/WebP，不看扩展名与 content-type（页面直传常常是 `application/octet-stream`） | 415，并在错误里回带请求体前 16 字节便于现场对账 |
+
+写入位置仍被批次目录围栏挡在 `grok-output/<batchId>/` 里（门①②③之外另有一道）。
+运维要给别的来源临时开口：`DVP_GROK_SAVE_ORIGINS="https://a.example"`（只按 origin 精确匹配）；
+本机无浏览器调用方要免 nonce：`DVP_GROK_SAVE_ALLOW_ANON=1`（默认关）。
+两道逃生口都只认环境变量，不会因为某个请求长得像旧版就被自动打开。
 
 **取图的三条通道，按推荐顺序**：
 
 | 通道 | 怎么做 | 边界 |
 | --- | --- | --- |
-| ① 页面内读字节（首选） | `fetch(url,{credentials:'include'})` → `arrayBuffer` → **原样 POST** `/dvp/grok/save?batch=&index=&slug=`（raw bytes） | 需要宿主路由在；响应只回元信息，字节不进会话 |
+| ① 页面内读字节（首选） | `fetch(url,{credentials:'include'})` → `arrayBuffer` → **原样 POST** `/dvp/grok/save?batch=&index=&slug=&nonce=`（raw bytes） | 需要宿主路由在；nonce 必带（见上表门②），响应只回元信息，字节不进会话 |
 | ② 浏览器磁盘缓存 | `node tools/scan-cache.mjs --bytes <体积> --out <批次目录> --name <文件名>` | 只对**已完整显示过**的图有效；体积撞车要验签名；缓存会被轮转，尽早取 |
 | ③ 用户点一次 Download | `node tools/watch-downloads.mjs --out <批次目录>` 接住并自动改名写账 | 需要人点；自动化附加模式下点按钮不落盘 |
 
