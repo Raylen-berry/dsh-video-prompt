@@ -20,6 +20,11 @@
 //        POST /dvp/grok/save                 保存抓到的成图字节（首选 raw bytes 直传，
 //                                            兼容 JSON base64/URL；响应只回元信息，字节不进会话）
 //                                            CORS 白名单回显 + 批次 nonce + 图片魔术字节，三道门见下方同名注释
+//        GET  /dvp/grok/run                  统一任务记录：按 batchId 取单条明细（只读，不写盘）
+//                                            ?driver=1 附「仅重试失败项」清单；?verify=stat 只做存在性/字节校验
+//        GET  /dvp/grok/runs                 统一任务记录：最近若干批的列表（只读，stat 级校验）
+//        POST /dvp/grok/run                  统一任务记录：显式登记 begin / cancel / clear
+//                                            （只写该批 run.json 的 control 段，不动 plan/ledger/产物）
 //        POST /dvp/skills/reload             重扫技能目录：开机后新增的技能免重启注册
 //                                            （同名 first-wins，改已有技能正文仍需重启）
 //
@@ -550,6 +555,412 @@ export function driverDoc(plan) {
     lines.push('')
   }
   return lines.join('\n')
+}
+
+// ── 统一任务记录（run.json）：一条记录 = 一个批次 ─────────────────────────────
+//
+// 一条记录要能回答四件事：**当前步骤 / 失败原因 / 产物位置 / 状态**，并支撑三个动作：
+// 续跑、仅重试失败项、取消。这里先把它落成一个**推导函数**，再由路由去读盘喂给它。
+//
+// 为什么另起一本 run.json，而不是往 ledger.json 上加字段：
+//   ① ledger.json 是**追加式账本**：每落一张图 push 一条，`items[].file` 指回本批产物，
+//      「一批一本账」是上一轮刚修好的语义。任务记录是**可变的状态视图**（当前步骤、失败原因、
+//      取消标记、计数），往账本里塞这些字段就必须**为了改状态而重写账本** —— 账本就不再是账本。
+//   ② 还没落任何图的新批次**根本没有** ledger.json，而任务记录从建批次那一刻就该存在。
+//   ③ run.json 是**物化视图**（源：plan.json + ledger.json + 盘上事实 + control）：丢了/坏了都能重算，
+//      账本与产物则一条都不能少 —— 所以"可重算的东西"单独放一份，别去污染"事实记录"。
+//
+// control 是唯一推导不出来的东西：谁登记了开始/取消、何时、为什么。它只由 POST /dvp/grok/run 写。
+// 查询（GET）**全程只读**：不建目录、不动 index.json、不刷 run.json（断言见 verify-grok-bytes 第 5 节）。
+//
+// 「失败项」的判据（也就是"仅重试失败项"的输入清单）：
+//   never-run        计划里有这一项，账本里没有 ⇒ 从未落图（含跑到一半被打断的）
+//   file-missing     账本记过这一项，产物文件已不在盘上
+//   bytes-mismatch   盘上文件字节数与账本记的不一致
+//   sha256-mismatch  盘上文件 sha256 与账本记的不一致（只有 sha256 档校验查得出）
+// 同一 index 被重存多次时**以账本里最后一条为准**（前面的已被覆盖，不算失败）。
+
+const RUN_RECORD_FILE = 'run.json'
+// 六个状态（README 有对照表）：pending / running / partial / succeeded / failed / cancelled。
+// running **只在有人显式登记 begin 时出现** —— 宿主看不到那个浏览器会话，不猜。
+const RUN_CONTROL_ACTIONS = Object.freeze(['begin', 'cancel', 'clear'])
+const RUN_CONTROL_HISTORY_LIMIT = 50
+/** begin 登记的有效期：过了就不再算"运行中"（否则一个没清掉的标记会永远显示运行中）。 */
+const RUN_RUNNING_TTL_MS = 2 * 60 * 60 * 1000
+const RUN_LIST_LIMIT = 20
+const RUN_LIST_MAX = 50
+const RUN_FAILURE_REASONS = Object.freeze({
+  'never-run': '计划里有这一项，账本里没有：从未落图（含跑到一半被打断的）',
+  'file-missing': '账本记过这一项，但产物文件已不在盘上',
+  'bytes-mismatch': '盘上文件的字节数与账本记的不一致',
+  'sha256-mismatch': '盘上文件的 sha256 与账本记的不一致（内容被动过）',
+})
+
+/** 计划条目的序号：plan.json 落盘时就是 `Number(entry.index) || 位置+1`，这里同一口径。 */
+function runEntryIndex(entry, position) {
+  const index = Number(entry && entry.index)
+  return Number.isFinite(index) && index > 0 ? Math.floor(index) : position + 1
+}
+
+function runEntrySlug(entry) {
+  const slug = String((entry && entry.slug) || '').trim()
+  return slug === '' ? 'prompt' : slug
+}
+
+/** 这一项"本该落在哪"：账本里记过就用账本那条路径，否则按 driver.md 的命名规矩推。 */
+function runExpectedFile(dir, index, slug, item) {
+  if (item !== undefined && typeof item.file === 'string' && item.file !== '') return item.file
+  return path.join(dir, String(index).padStart(2, '0') + '-' + slug + '.png')
+}
+
+/** control 段落清洗：坏值一律当没有（它是状态标记，不值得为它报错）。 */
+export function normalizeRunControl(raw) {
+  const out = { running: null, cancelled: null, history: [] }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return out
+  const mark = (value) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+    if (typeof value.at !== 'string' || value.at === '') return null
+    return {
+      at: value.at,
+      by: typeof value.by === 'string' ? value.by : '',
+      reason: typeof value.reason === 'string' ? value.reason : '',
+    }
+  }
+  out.running = mark(raw.running)
+  out.cancelled = mark(raw.cancelled)
+  const history = Array.isArray(raw.history) ? raw.history : []
+  out.history = history
+    .filter((item) => item !== null && typeof item === 'object' && !Array.isArray(item) && typeof item.action === 'string')
+    .slice(-RUN_CONTROL_HISTORY_LIMIT)
+    .map((item) => ({ action: item.action, at: String(item.at || ''), by: String(item.by || ''), reason: String(item.reason || '') }))
+  return out
+}
+
+/**
+ * 登记一次状态动作（纯函数）。三个动作各自的语义：
+ *   begin   "我开始做这一批了"（重发 plan = 续跑时自动登记）。它会**解掉取消标记**并留一条 resume ——
+ *           否则"取消过就永远不能再跑"。新建批次不登记 begin：那只是"建好了待派发"。
+ *   cancel  没有真中断机制，所以这里只**记下**取消（谁、何时、为什么）：不动产物、不杀进程。
+ *   clear   把 running / cancelled 两个标记都清掉（误标一次不至于让这一批废掉）。
+ * 返回 `{ control, action }`；动作不认识时返回 `{ error }`。
+ */
+export function applyRunControl(raw, action, options) {
+  const control = normalizeRunControl(raw)
+  const opts = options !== null && typeof options === 'object' ? options : {}
+  const name = typeof action === 'string' ? action.trim() : ''
+  if (!RUN_CONTROL_ACTIONS.includes(name)) {
+    return { error: '未知动作：' + (name === '' ? '（空）' : name) + '（只认 ' + RUN_CONTROL_ACTIONS.join(' / ') + '）' }
+  }
+  const at = typeof opts.at === 'string' && opts.at !== '' ? opts.at : new Date().toISOString()
+  const by = String(opts.by || 'session').slice(0, 120)
+  const reason = String(opts.reason || '').slice(0, 300)
+  const push = (entry) => {
+    control.history.push({ action: entry, at, by, reason })
+    if (control.history.length > RUN_CONTROL_HISTORY_LIMIT) control.history = control.history.slice(-RUN_CONTROL_HISTORY_LIMIT)
+  }
+  if (name === 'begin') {
+    if (control.cancelled !== null) {
+      control.cancelled = null
+      push('resume')
+    }
+    control.running = { at, by, reason }
+    push('begin')
+    return { control, action: name }
+  }
+  if (name === 'cancel') {
+    control.cancelled = { at, by, reason }
+    control.running = null
+    push('cancel')
+    return { control, action: name }
+  }
+  control.running = null
+  control.cancelled = null
+  push('clear')
+  return { control, action: name }
+}
+
+/**
+ * 由可观测事实推导一条任务记录（纯函数：不读盘、不写盘、不看时钟以外的东西）。
+ *
+ *   输入 plan / ledger   —— plan.json、ledger.json 的内容（都可缺）
+ *        control          —— run.json 里那段推导不出来的东西（可缺）
+ *        disk             —— Map<绝对路径, { exists, bytes, sha256 }>（不在表里 = 盘上没这个文件）
+ *        verify           —— 'sha256'（逐项重算哈希）| 'stat'（只看存在与字节数）
+ *        batchId / dir / now
+ *   输出 一条记录的完整形状 —— **run.json 里存的就是它**，所以落盘与查询走同一份口径。
+ *
+ * 状态判定顺序（先满足的先算）：
+ *   ① missing=0 且 failed=0 且 total>0            → succeeded（全部有可校验的产物）
+ *   ② control.cancelled 有值                      → cancelled（有产物但有半截时也算 cancelled，计数说明一切）
+ *   ③ control.running 未过期                       → running
+ *   ④ succeeded>0（还有没成的）                    → partial
+ *   ⑤ failed>0（一个都没成）                       → failed
+ *   ⑥ 其余                                        → pending（一项都还没跑）
+ * 计数恒等式：succeeded + failed + missing === total（账上多出来的产物记在 orphans，另算）。
+ */
+export function buildGrokRunRecord(input) {
+  const src = input !== null && typeof input === 'object' ? input : {}
+  const now = Number.isFinite(src.now) ? src.now : Date.now()
+  const verify = src.verify === 'sha256' ? 'sha256' : 'stat'
+  const batchId = typeof src.batchId === 'string' ? src.batchId : ''
+  const dir = typeof src.dir === 'string' ? src.dir : ''
+  const plan = src.plan !== null && typeof src.plan === 'object' && !Array.isArray(src.plan) ? src.plan : null
+  const ledger = src.ledger !== null && typeof src.ledger === 'object' && !Array.isArray(src.ledger) ? src.ledger : null
+  const control = normalizeRunControl(src.control)
+  const disk = src.disk instanceof Map ? src.disk : new Map()
+  const warnings = []
+
+  const entries = plan !== null && Array.isArray(plan.entries) ? plan.entries : []
+  const items = ledger !== null && Array.isArray(ledger.items) ? ledger.items : []
+  if (plan === null) warnings.push('plan.json 读不到：总数以账本条目的序号为准')
+  else if (entries.length === 0) warnings.push('plan.json 的 entries 为空：总数以账本条目的序号为准')
+
+  // 同一 index 重存多次：数组顺序即写入顺序 ⇒ 最后一条胜出。
+  const latest = new Map()
+  for (const item of items) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) continue
+    const index = Number(item.index)
+    if (!Number.isFinite(index) || index <= 0) continue
+    latest.set(Math.floor(index), item)
+  }
+  const entryByIndex = new Map()
+  entries.forEach((entry, position) => {
+    const index = runEntryIndex(entry, position)
+    if (!entryByIndex.has(index)) entryByIndex.set(index, entry)
+  })
+  const planned = entries.length > 0 ? new Set(entryByIndex.keys()) : new Set(latest.keys())
+
+  const artifacts = []
+  const orphans = []
+  const failures = []
+  const missingSha = []
+  for (const index of [...latest.keys()].sort((a, b) => a - b)) {
+    const item = latest.get(index)
+    const entry = entryByIndex.get(index)
+    const slug = entry === undefined ? runEntrySlug(item) : runEntrySlug(entry)
+    const title = entry === undefined ? '' : String((entry && entry.title) || '')
+    const file = typeof item.file === 'string' ? item.file : ''
+    const fact = file === '' ? undefined : disk.get(file)
+    const exists = !!(fact && fact.exists === true)
+    let reason = ''
+    if (!exists) reason = 'file-missing'
+    else if (typeof item.bytes === 'number' && fact.bytes !== item.bytes) reason = 'bytes-mismatch'
+    // fact.sha256 为空 = 这一档没重算哈希（stat 档）⇒ 只当"没校验到"，不当"不符"。
+    else if (verify === 'sha256' && typeof item.sha256 === 'string' && item.sha256 !== ''
+      && typeof fact.sha256 === 'string' && fact.sha256 !== '' && fact.sha256 !== item.sha256) reason = 'sha256-mismatch'
+    if (exists && typeof item.sha256 !== 'string' && !missingSha.includes(index)) missingSha.push(index)
+    const artifact = {
+      index,
+      slug,
+      title,
+      file,
+      relFile: dir === '' || file === '' ? '' : path.relative(dir, file).split(path.sep).join('/'),
+      bytes: exists ? fact.bytes : (typeof item.bytes === 'number' ? item.bytes : 0),
+      sha256: typeof item.sha256 === 'string' ? item.sha256 : '',
+      signature: typeof item.signature === 'string' ? item.signature : '',
+      at: typeof item.at === 'string' ? item.at : '',
+    }
+    if (planned.has(index)) {
+      if (reason === '') artifacts.push({ ...artifact, verified: verify })
+      else failures.push({ index, slug, title, reason, detail: RUN_FAILURE_REASONS[reason], file, expectedFile: runExpectedFile(dir, index, slug, item), at: artifact.at })
+    } else {
+      // 账上有、计划里没有：不当成失败（它可能是手动补投的图），单独列出来并留一句警告。
+      orphans.push({ ...artifact, verified: reason === '' ? verify : reason })
+    }
+  }
+  for (const [index, entry] of entryByIndex) {
+    if (latest.has(index)) continue
+    const slug = runEntrySlug(entry)
+    failures.push({
+      index,
+      slug,
+      title: String((entry && entry.title) || ''),
+      reason: 'never-run',
+      detail: RUN_FAILURE_REASONS['never-run'],
+      file: '',
+      expectedFile: runExpectedFile(dir, index, slug, undefined),
+      at: '',
+    })
+  }
+  failures.sort((a, b) => a.index - b.index)
+
+  const total = planned.size
+  const succeeded = artifacts.length
+  const failed = failures.filter((item) => item.reason !== 'never-run').length
+  const missing = failures.filter((item) => item.reason === 'never-run').length
+  if (orphans.length > 0) {
+    warnings.push('账本里有 ' + orphans.length + ' 条产物不在本批计划里（序号 ' + orphans.map((o) => o.index).join('/') + '）：不计入成功/失败，另列 orphans')
+  }
+  if (missingSha.length > 0) warnings.push('账本缺 sha256 的旧条目（序号 ' + missingSha.join('/') + '）：只能按存在性与字节数校验')
+
+  const runningFresh = control.running !== null && (() => {
+    const at = Date.parse(control.running.at)
+    return Number.isFinite(at) && now - at >= 0 && now - at <= RUN_RUNNING_TTL_MS
+  })()
+  if (control.running !== null && !runningFresh) warnings.push('begin 登记已超过 ' + Math.round(RUN_RUNNING_TTL_MS / 3600000) + ' 小时，不再算运行中')
+
+  let status
+  if (total > 0 && missing === 0 && failed === 0) status = 'succeeded'
+  else if (control.cancelled !== null) status = 'cancelled'
+  else if (runningFresh) status = 'running'
+  else if (succeeded > 0) status = 'partial'
+  else if (failed > 0) status = 'failed'
+  else status = 'pending'
+
+  // 当前步骤：**由可观测事实推导**，不是会话自述。running/dispatch 只在有人登记过 begin 时出现。
+  let step
+  if (status === 'succeeded') {
+    step = { id: 'done', label: '完成：' + total + ' 项都有可校验的产物' }
+  } else if (status === 'cancelled') {
+    const mark = control.cancelled
+    step = { id: 'cancelled', label: '已取消（' + (mark.by || '未记名') + ' 于 ' + mark.at + (mark.reason === '' ? '' : '：' + mark.reason) + '）' }
+  } else if (status === 'failed') {
+    step = { id: 'verify', label: '产物校验未过：' + failed + ' 项坏/缺，' + missing + ' 项未跑' }
+  } else if (status === 'running') {
+    const mark = control.running
+    step = { id: 'dispatch', label: '驱动中（' + (mark.by || '未记名') + ' 于 ' + mark.at + ' 登记开始）' }
+  } else if (succeeded > 0) {
+    step = { id: 'collect', label: '收图中：已落 ' + succeeded + ' / ' + total + ' 项（还差 ' + (failed + missing) + ' 项）' }
+  } else {
+    step = { id: 'plan', label: '批次已建立，尚无成图（待派发）' }
+  }
+
+  const stamps = [plan === null ? '' : String(plan.createdAt || ''), ledger === null ? '' : String(ledger.updatedAt || '')]
+    .concat(artifacts.map((a) => a.at), failures.map((f) => f.at), control.history.map((h) => h.at))
+    .filter((value) => typeof value === 'string' && Number.isFinite(Date.parse(value)))
+  stamps.sort((a, b) => Date.parse(a) - Date.parse(b))
+
+  return {
+    runId: batchId,
+    batchId,
+    kind: 'grok-batch',
+    status,
+    step,
+    counts: { total, succeeded, failed, missing, orphan: orphans.length },
+    failures,
+    artifacts,
+    orphans,
+    control,
+    warnings,
+    dir,
+    planFile: dir === '' ? '' : path.join(dir, 'plan.json'),
+    ledgerFile: dir === '' ? '' : path.join(dir, 'ledger.json'),
+    runFile: dir === '' ? '' : path.join(dir, RUN_RECORD_FILE),
+    createdAt: plan === null ? '' : String(plan.createdAt || ''),
+    startedAt: (plan !== null && typeof plan.createdAt === 'string' && plan.createdAt !== '')
+      ? plan.createdAt
+      : (stamps.length > 0 ? stamps[0] : ''),
+    updatedAt: stamps.length > 0 ? stamps[stamps.length - 1] : '',
+    verify,
+  }
+}
+
+/**
+ * 「仅重试失败项」的驱动清单（纯函数，给人看也给会话里的 agent 看）。
+ *
+ * 这只做到了**清单输出**：宿主不驱动浏览器，"自动重跑"这件事由会话里的 agent 照着这份清单做。
+ * 清单刻意**不新建批次、不重发 plan**：已成功的那几项不再投，只补失败项，图照旧进同一批目录。
+ * nonce 不写进这份文本（它只沿"派发"那条线走）——只告诉你去本批 plan.json 里读。
+ */
+export function runRetryDriverDoc(record, plan) {
+  const rec = record !== null && typeof record === 'object' ? record : {}
+  const failures = Array.isArray(rec.failures) ? rec.failures : []
+  const counts = rec.counts !== null && typeof rec.counts === 'object' ? rec.counts : {}
+  const batchId = String(rec.batchId || '')
+  const dir = String(rec.dir || '')
+  const planFile = String(rec.planFile || (dir === '' ? 'plan.json' : path.join(dir, 'plan.json')))
+  const entries = plan !== null && typeof plan === 'object' && Array.isArray(plan.entries) ? plan.entries : []
+  const promptOf = (index) => {
+    for (let i = 0; i < entries.length; i += 1) {
+      if (runEntryIndex(entries[i], i) === index) return String((entries[i] && entries[i].prompt) || '')
+    }
+    return ''
+  }
+  const n = (value) => (Number.isFinite(value) ? value : 0)
+  const lines = []
+  lines.push('# 仅重试失败项 · ' + batchId)
+  lines.push('')
+  lines.push('- 批次目录：' + dir)
+  lines.push('- 本批共 ' + n(counts.total) + ' 项：成功 ' + n(counts.succeeded) + ' / 失败 ' + n(counts.failed) + ' / 未跑 ' + n(counts.missing))
+  lines.push('- 本次**只重跑下面 ' + failures.length + ' 项**：已成功的那 ' + n(counts.succeeded) + ' 项不再投，也**不新建批次**')
+  lines.push('  （新建批次会另起一个目录，本批永远补不齐）。')
+  lines.push('- 存图 nonce 从本批 `' + planFile + '` 里读 `saveNonce`（`GET /dvp/grok/plan` 刻意不回吐它）。')
+  lines.push('  本机没有那个值（宿主重启过、批次被别人重发过）时：对**同一个批次**重发 `POST /dvp/grok/plan`')
+  lines.push('  （带 `batch=' + batchId + '` 与全量 entries）换一把新的 —— 那也算续跑，写回同一目录，历史里会留一条 resume。')
+  lines.push('')
+  if (failures.length === 0) {
+    lines.push('（本批没有需要重跑的项。）')
+    return lines.join('\n')
+  }
+  lines.push('## 重跑清单')
+  lines.push('')
+  for (const item of failures) {
+    const slug = String(item.slug || 'prompt')
+    const expected = String(item.expectedFile || item.file || '')
+    lines.push('### ' + String(item.index).padStart(2, '0') + '. ' + (item.title || slug))
+    lines.push('')
+    lines.push('- 为什么重跑：' + (item.detail || RUN_FAILURE_REASONS[item.reason] || item.reason) + '（reason=' + item.reason + '）')
+    lines.push('- 落盘文件名：`' + (expected === '' ? String(item.index).padStart(2, '0') + '-' + slug + '.png' : path.basename(expected)) + '`')
+    lines.push('- 取图 → 落盘：`POST /dvp/grok/save?batch=' + batchId + '&index=' + item.index + '&slug=' + slug
+      + '&ext=<该图真实封装>&nonce=<本批 saveNonce>`（raw bytes；字节/base64 一律不进会话文本）')
+    const prompt = promptOf(item.index)
+    if (prompt !== '') {
+      lines.push('')
+      lines.push('```text')
+      lines.push(prompt)
+      lines.push('```')
+    }
+    lines.push('')
+  }
+  lines.push('## 做完之后')
+  lines.push('')
+  lines.push('- 重新 `GET /dvp/grok/run?batch=' + batchId + '&driver=1` 看 `status` 与 `counts`：')
+  lines.push('  `failures` 空、`missing` 与 `failed` 都是 0 才算这一批做完；')
+  lines.push('- 若中途要停：`POST /dvp/grok/run`（`{batchId:"' + batchId + '",action:"cancel",by:"<谁>",reason:"<为什么>"}`）')
+  lines.push('  只**记下**取消（不动产物、不杀进程）；下次重发 plan 就是续跑，会留一条 resume。')
+  return lines.join('\n')
+}
+
+/** 账本里所有记过的产物路径（去重前先收齐，缺字段的旧账本一律忽略）。 */
+function ledgerArtifactFiles(ledger) {
+  const out = []
+  if (ledger !== null && typeof ledger === 'object' && Array.isArray(ledger.items)) {
+    for (const item of ledger.items) {
+      if (item !== null && typeof item === 'object' && typeof item.file === 'string' && item.file !== '') out.push(item.file)
+    }
+  }
+  return out
+}
+
+/** 读一份 JSON；缺失/损坏都返回 null（记录是推导件，读不到就当没有，绝不因此报错）。 */
+async function readJsonOrNull(file) {
+  try {
+    const parsed = JSON.parse(await fsp.readFile(file, 'utf8'))
+    return parsed === null || typeof parsed !== 'object' ? null : parsed
+  } catch {
+    return null
+  }
+}
+
+/** 把盘上事实收成 Map<路径, {exists,bytes,sha256}>。sha256 档才真的读文件算哈希。 */
+async function collectRunDiskFacts(files, verify) {
+  const disk = new Map()
+  for (const file of files) {
+    if (typeof file !== 'string' || file === '' || disk.has(file)) continue
+    try {
+      const stat = await fsp.stat(file)
+      if (!stat.isFile()) {
+        disk.set(file, { exists: false, bytes: 0, sha256: null })
+        continue
+      }
+      const fact = { exists: true, bytes: stat.size, sha256: null }
+      if (verify === 'sha256') fact.sha256 = createHash('sha256').update(await fsp.readFile(file)).digest('hex')
+      disk.set(file, fact)
+    } catch {
+      disk.set(file, { exists: false, bytes: 0, sha256: null })
+    }
+  }
+  return disk
 }
 
 // ── 路径围栏 ────────────────────────────────────────────────────────────────
@@ -1396,6 +1807,7 @@ export async function apply(ctx, rawConfig = {}) {
     planFile: path.join(dir, 'plan.json'),
     driverFile: path.join(dir, 'driver.md'),
     ledgerFile: path.join(dir, 'ledger.json'),
+    runFile: path.join(dir, RUN_RECORD_FILE),
     root,
   })
 
@@ -1408,6 +1820,27 @@ export async function apply(ctx, rawConfig = {}) {
       return byId.get(index.latest)
     }
     return scanned.reduce((best, item) => (item.mtime > best.mtime ? item : best), scanned[0])
+  }
+
+  /**
+   * 推导一条任务记录（**只读**：不建目录、不动 index.json、不刷 run.json）。
+   * 查询路由走它，写盘路由也走它 —— 落盘与查询同一份口径，不会各自长歪。
+   */
+  async function deriveGrokRunRecord(batchId, dir, verify, controlOverride) {
+    const plan = await readJsonOrNull(path.join(dir, 'plan.json'))
+    const ledger = await readJsonOrNull(path.join(dir, 'ledger.json'))
+    const stored = await readJsonOrNull(path.join(dir, RUN_RECORD_FILE))
+    const control = controlOverride === undefined ? (stored === null ? null : stored.control) : controlOverride
+    const disk = await collectRunDiskFacts(ledgerArtifactFiles(ledger), verify)
+    const record = buildGrokRunRecord({ plan, ledger, control, disk, verify, batchId, dir, now: Date.now() })
+    return { record, plan, ledger, stored }
+  }
+
+  /** 把推导出来的记录落到 `<批次目录>/run.json`（图已经躺在盘上了，这一步失败不翻转成失败）。 */
+  async function refreshGrokRunRecord(batchId, dir, verify, controlOverride) {
+    const { record } = await deriveGrokRunRecord(batchId, dir, verify, controlOverride)
+    await fsp.writeFile(path.join(dir, RUN_RECORD_FILE), JSON.stringify(record, null, 2), 'utf8')
+    return record
   }
 
   /** 落盘一批：新建（不传批次身份）或续做（传了 batchId/dir）。返回 { error } 表示调用方要拒掉。 */
@@ -1486,6 +1919,26 @@ export async function apply(ctx, rawConfig = {}) {
     await fsp.writeFile(path.join(dir, 'plan.json'), JSON.stringify(plan, null, 2), 'utf8')
     await fsp.writeFile(path.join(dir, 'driver.md'), driverDoc(plan), 'utf8')
     await touchGrokIndex(root, batchId)
+    // 任务记录跟着批次一起落盘：建批次那一刻就该有一条记录（此刻还没图 ⇒ pending / 待派发）。
+    // 续做已有批次（调用方给了批次身份）时登记一次 begin —— 那正是"续跑"这件事本身：
+    // 写回同一目录、换新 nonce，并解掉可能存在的取消标记（历史里留一条 resume，谁解的、何时有据可查）。
+    let record = null
+    try {
+      const previous = await readJsonOrNull(path.join(dir, RUN_RECORD_FILE))
+      let control = previous === null ? null : previous.control
+      if (wanted.id !== '' && wanted.id !== BATCH_ROOT) {
+        const applied = applyRunControl(control, 'begin', {
+          at: new Date().toISOString(),
+          by: 'plan-reissue',
+          reason: '重发同一批次（续跑 / 重试这一批）',
+        })
+        if (applied.error === undefined) control = applied.control
+      }
+      record = await refreshGrokRunRecord(batchId, dir, 'stat', control)
+    } catch (err) {
+      // 记录是推导件（源在 plan.json + ledger.json + 盘上事实），写不进去不影响这一批本身。
+      console.warn('[dsh-video-prompt] run.json 未能落盘（查询路由会按 plan/ledger 重算）：' + String((err && err.message) || err))
+    }
     sendJson(res, 200, {
       ok: true,
       ...grokBatchInfo(root, batchId, dir),
@@ -1495,6 +1948,7 @@ export async function apply(ctx, rawConfig = {}) {
       saveNonce,
       ...(options === undefined ? {} : { options }),
       ...(sourceFile === '' ? {} : { sourceFile, sourceChars }),
+      ...(record === null ? {} : { record }),
     })
     return undefined
   }
@@ -1535,7 +1989,10 @@ export async function apply(ctx, rawConfig = {}) {
           // 只读端点，把 nonce 放在这里等于让任意网页读它 —— 那 nonce 就白加了。
           if (plan !== null && typeof plan === 'object') delete plan.saveNonce
           const batches = scanGrokBatches(root).sort((a, b) => b.mtime - a.mtime).map((item) => item.batchId)
-          sendJson(res, 200, { ok: true, ...info, plan, batches })
+          // 顺手带上任务记录（stat 级，不逐项重算哈希）：面板读一次就能看到状态/当前步骤/还差几项。
+          // 只读 —— 这里**不**写 run.json，也不碰 index.json。
+          const runRecord = (await deriveGrokRunRecord(picked.batchId, info.dir, 'stat')).record
+          sendJson(res, 200, { ok: true, ...info, plan, batches, record: runRecord })
           return
         }
         if (req.method === 'POST' || req.method === 'PUT') {
@@ -1755,6 +2212,14 @@ export async function apply(ctx, rawConfig = {}) {
         ledger.updatedAt = new Date().toISOString()
         await fsp.writeFile(ledgerFile, JSON.stringify(ledger, null, 2), 'utf8')
         await touchGrokIndex(root, batchId)
+        // 任务记录跟着刷一次（stat 级：刚落的这张已知哈希，不必再把整批读一遍）。
+        // 落盘失败不翻转成失败：图已经躺在盘上了，而记录可由 plan/ledger 重算。
+        let runRecord = null
+        try {
+          runRecord = await refreshGrokRunRecord(batchId, dir, 'stat')
+        } catch (err) {
+          console.warn('[dsh-video-prompt] run.json 未能刷新（查询路由会按 plan/ledger 重算）：' + String((err && err.message) || err))
+        }
         // 回给会话的全部家当就是这一小段元信息 —— 字节本身已经躺在盘上。
         sendJson(res, 200, {
           ok: true,
@@ -1767,9 +2232,161 @@ export async function apply(ctx, rawConfig = {}) {
           height: dims.height,
           dir,
           ledger: ledgerFile,
+          // 记录侧的进度（status 已被占用为 "saved"，这里另起名，不动老字段）。
+          run: path.join(dir, RUN_RECORD_FILE),
+          ...(runRecord === null ? {} : { runStatus: runRecord.status, remaining: runRecord.failures.length }),
         }, cors)
       } catch (err) {
         deny(500, String((err && err.message) || err), cors)
+      }
+    },
+  }))
+
+  // ---- ⑨b 统一任务记录：一条记录 = 一个批次（查询只读 · 状态登记才写）----
+  //
+  // 查询（GET）**不写任何文件**：不建目录、不动 index.json、不刷 run.json、不碰 plan/ledger/产物 ——
+  // 断言里对该批目录整棵树做 sha256 前后比对（tools/verify-grok-bytes.mjs 第 5 节）。
+  // 需要落盘的那一份 run.json 由写盘路径维护（建批次 / 存图 / 下面的 POST 登记），查询只推导不落盘。
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/dvp/grok/run',
+    handler: async (req, res) => {
+      try {
+        const root = grokRoot()
+        if (req.method === 'GET') {
+          const raw = query(req.url, 'batch')
+          const requested = normalizeGrokBatchId(raw)
+          if (raw !== '' && requested === '') {
+            sendJson(res, 400, { ok: false, error: 'batch 非法（只能是单个目录名）' })
+            return
+          }
+          // 默认 sha256 档（逐项重算哈希，能抓出"文件被改过"）；列表与轮询场景可以显式要 stat 档。
+          const verify = query(req.url, 'verify') === 'stat' ? 'stat' : 'sha256'
+          let picked = null
+          if (requested !== '') {
+            if (requested.toLowerCase() === LEGACY_BATCH_ID) {
+              picked = existsSync(path.join(root, 'plan.json'))
+                ? { batchId: LEGACY_BATCH_ID, legacy: true, dir: root }
+                : null
+            } else {
+              // 显式点名一个批次目录：只要目录在就给记录 —— plan.json 丢了也还能按账本看（warnings 里写明）。
+              const dir = path.join(root, requested)
+              picked = existsSync(dir) ? { batchId: requested, legacy: false, dir } : null
+            }
+          } else {
+            const latest = await resolveLatestGrokBatch(root, await readGrokIndex(root))
+            picked = latest === null
+              ? null
+              : {
+                batchId: latest.batchId,
+                legacy: latest.legacy === true,
+                dir: latest.legacy === true ? root : path.join(root, latest.batchId),
+              }
+          }
+          if (picked === null) {
+            sendJson(res, 404, { ok: false, error: '批次不存在：' + (requested === '' ? '（当前没有批次）' : requested) })
+            return
+          }
+          if (!allowAny(picked.dir)) {
+            sendJson(res, 403, { ok: false, error: '批次目录越界' })
+            return
+          }
+          const { record, plan, stored } = await deriveGrokRunRecord(picked.batchId, picked.dir, verify)
+          const payload = {
+            ok: true,
+            ...record,
+            legacy: picked.legacy === true,
+            // 'run.json' = 盘上有落过的那一份（写盘时是 stat 档）；'derived' = 只有源文件，本响应现算（旧批次就走这条）。
+            source: stored === null ? 'derived' : 'run.json',
+            at: new Date().toISOString(),
+          }
+          if (query(req.url, 'driver') !== '') payload.retryDriver = runRetryDriverDoc(record, plan)
+          sendJson(res, 200, payload)
+          return
+        }
+        if (req.method === 'POST' || req.method === 'PUT') {
+          const body = JSON.parse(await readBody(req, 64 * 1024))
+          const wanted = wantBatch(body)
+          if (!wanted.ok) {
+            sendJson(res, 400, {
+              ok: false,
+              error: wanted.legacyAlias === true
+                ? 'legacy 是旧版平铺布局的只读别名，不能登记状态；请对具体 batchId 操作'
+                : 'batchId 非法：只能是单个目录名（不含 / \\ : 与 ..）',
+            })
+            return
+          }
+          if (wanted.id === '' || wanted.id === BATCH_ROOT) {
+            sendJson(res, 400, { ok: false, error: '需要 batchId：状态登记只针对一个具体批次' })
+            return
+          }
+          const dir = path.join(root, wanted.id)
+          // "批次"的定义与 plan 路由同一口径：目录里有 plan.json 才算（免得往 grok-output 下的
+          // 别的目录里顺手写一份 run.json）。
+          if (!existsSync(path.join(dir, 'plan.json'))) {
+            sendJson(res, 404, { ok: false, error: '批次不存在：' + wanted.id + '（先用 /dvp/grok/plan 建批次）' })
+            return
+          }
+          if (!allowAny(dir)) {
+            sendJson(res, 403, { ok: false, error: '批次目录越界' })
+            return
+          }
+          const previous = await readJsonOrNull(path.join(dir, RUN_RECORD_FILE))
+          const applied = applyRunControl(previous === null ? null : previous.control, body.action, { by: body.by, reason: body.reason })
+          if (applied.error !== undefined) {
+            sendJson(res, 400, { ok: false, error: applied.error })
+            return
+          }
+          // 只动 run.json 的 control 那一段：plan.json / ledger.json / 成图一个字节都不碰。
+          const record = await refreshGrokRunRecord(wanted.id, dir, 'stat', applied.control)
+          sendJson(res, 200, { ok: true, action: applied.action, ...record, source: 'run.json', at: new Date().toISOString() })
+          return
+        }
+        sendJson(res, 405, { ok: false, error: '方法不允许' })
+      } catch (err) {
+        sendJson(res, 400, { ok: false, error: String((err && err.message) || err) })
+      }
+    },
+  }))
+
+  // 最近若干批：给"任务记录列表"用。stat 档（不逐项算哈希）—— 列表只回答"哪批什么状态、还差几项"。
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/dvp/grok/runs',
+    handler: async (req, res) => {
+      try {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { ok: false, error: '方法不允许' })
+          return
+        }
+        const root = grokRoot()
+        const wanted = Number(query(req.url, 'limit'))
+        const limit = Number.isFinite(wanted) && wanted > 0
+          ? Math.min(RUN_LIST_MAX, Math.floor(wanted))
+          : RUN_LIST_LIMIT
+        const scanned = scanGrokBatches(root).sort((a, b) => b.mtime - a.mtime).slice(0, limit)
+        const batches = []
+        for (const item of scanned) {
+          const dir = item.legacy === true ? root : path.join(root, item.batchId)
+          if (!allowAny(dir)) continue
+          const { record } = await deriveGrokRunRecord(item.batchId, dir, 'stat')
+          batches.push({
+            runId: record.runId,
+            batchId: item.batchId,
+            legacy: item.legacy === true,
+            dir,
+            status: record.status,
+            step: record.step,
+            counts: record.counts,
+            // 失败项条数 = "仅重试失败项"要重跑多少条（`GET /dvp/grok/run?batch=<id>&driver=1` 拿清单）。
+            retryCount: record.failures.length,
+            createdAt: record.createdAt,
+            updatedAt: record.updatedAt,
+          })
+        }
+        sendJson(res, 200, { ok: true, root, verify: 'stat', limit, count: batches.length, batches })
+      } catch (err) {
+        sendJson(res, 500, { ok: false, error: String((err && err.message) || err) })
       }
     },
   }))

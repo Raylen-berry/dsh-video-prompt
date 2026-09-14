@@ -561,8 +561,563 @@ ok('saveImage 的返回值里没有字节/base64 字段', !('base64' in saved) &
 ok('saveImage 的返回值 JSON 里 0 字符 base64', b64Total(JSON.stringify(saved)) === 0)
 ok('saveImage 返回值也带路径与字节数', typeof saved.file === 'string' && saved.bytes === BIG.length, { file: saved.file, bytes: saved.bytes })
 
+// ── 5. 统一任务记录（run.json）：一条记录 = 一个批次 ─────────────────────────
+//
+// 一条记录要回答四件事（状态 / 当前步骤 / 失败原因 / 产物位置），并支撑三个动作（续跑 / 仅重试失败项 /
+// 取消）。这一节逐条钉住六件事：
+//   ① 一次成功批次 ⇒ status=succeeded、产物齐全（路径/字节/sha256/尺寸都在）
+//   ② 部分缺图 ⇒ partial、失败项清单与 reason 正确、产物位置正确
+//   ③ 续跑 / 仅重试失败项 ⇒ 清单只含该重跑的那几项，重跑走**既有 batch= 机制**且不新建批次
+//   ④ 取消 ⇒ 只记语义（谁/何时/为什么），不动产物、不杀进程
+//   ⑤ 只读查询路由**不写盘**：对整个 grok-output 树做 sha256 前后比对
+//   ⑥ 旧批次（没有 run.json、账本条目是旧字段）仍能读，且读它也不会"补"出一份 run.json
+//
+// 与第 2 节同一套离线口径：假图自己捏、临时 DSH_HOME、真 HTTP 承托、不联网、不碰真实媒体盘。
+// 反向验证时（把本文件指向改动前的实现）这些路由根本不注册 ⇒ 断言照常失败、脚本不崩：
+// 所有响应字段都经 runCounts()/failuresOf() 之类的兜底取值，路径也一律先判类型再用。
+console.log('\n5) /dvp/grok/run · 统一任务记录：状态 / 当前步骤 / 失败原因 / 产物位置')
+
+const fsp5 = fsp // 本节沿用同一份 fs.promises（别名只为让本节读起来自洽）
+
+const RUN_ROOT = path.join(MEDIA, 'grok-output')
+const runUrl = (qs) => BASE + '/dvp/grok/run?' + qs
+const runsUrl = (qs) => BASE + '/dvp/grok/runs' + (qs === undefined ? '' : '?' + qs)
+const planUrl = (qs) => BASE + '/dvp/grok/plan' + (qs === undefined ? '' : '?' + qs)
+const sha256Of = (bytes) => createHash('sha256').update(bytes).digest('hex')
+
+async function getJson(url) {
+  try {
+    const response = await fetch(url)
+    let body = {}
+    try {
+      const parsed = await response.json()
+      if (parsed !== null && typeof parsed === 'object') body = parsed
+    } catch { /* 非 JSON（反向验证时可能是 404 文本）一律当空对象 */ }
+    return { status: response.status, body }
+  } catch (err) {
+    return { status: 0, body: {}, error: String((err && err.message) || err) }
+  }
+}
+
+async function postJson(url, payload) {
+  try {
+    const response = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json; charset=utf-8' }, body: JSON.stringify(payload),
+    })
+    let body = {}
+    try {
+      const parsed = await response.json()
+      if (parsed !== null && typeof parsed === 'object') body = parsed
+    } catch { /* 同上 */ }
+    return { status: response.status, body }
+  } catch (err) {
+    return { status: 0, body: {}, error: String((err && err.message) || err) }
+  }
+}
+
+/** 裸字节存图（raw bytes 直传，与第 2 节同一条通道）。 */
+async function saveRaw(bytes, qs) {
+  try {
+    const response = await fetch(BASE + '/dvp/grok/save?' + qs, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: bytes,
+    })
+    let body = {}
+    try {
+      const parsed = await response.json()
+      if (parsed !== null && typeof parsed === 'object') body = parsed
+    } catch { /* 同上 */ }
+    return { status: response.status, body }
+  } catch (err) {
+    return { status: 0, body: {}, error: String((err && err.message) || err) }
+  }
+}
+
+// 记录字段的兜底取值：反向验证时响应里没有这些字段（路由根本没注册），一律退到"空值容器"，
+// 让断言**失败**而不是抛 TypeError —— 崩溃会让后面的断言一条都不跑，"失败数"就没意义了。
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+const asList = (v) => (Array.isArray(v) ? v : [])
+/** 取列表第 i 个元素，取不到给一个空对象（这样 `at(list, 0).file` 永远不炸）。 */
+const at = (list, index) => (isObj(asList(list)[index]) ? asList(list)[index] : {})
+const runCounts = (b) => (isObj(b) && isObj(b.counts) ? b.counts : {})
+const runStepId = (b) => (isObj(b) && isObj(b.step) ? String(b.step.id || '') : '')
+const runStepLabel = (b) => (isObj(b) && isObj(b.step) ? String(b.step.label || '') : '')
+const runFailures = (b) => (isObj(b) ? asList(b.failures) : [])
+const runArtifacts = (b) => (isObj(b) ? asList(b.artifacts) : [])
+const runWarnings = (b) => (isObj(b) ? asList(b.warnings) : [])
+const runControl = (b) => (isObj(b) && isObj(b.control) ? b.control : {})
+const runHistory = (b) => asList(runControl(b).history)
+const runMark = (b, which) => (isObj(runControl(b)[which]) ? runControl(b)[which] : {})
+const runBatches = (b) => (isObj(b) ? asList(b.batches) : [])
+const reasonOf = (failure) => (isObj(failure) ? String(failure.reason || '') : '')
+const hasAction = (historyList, action) => asList(historyList).some((h) => isObj(h) && h.action === action)
+
+/** 整棵树的内容快照（相对路径 : 字节数 : sha256）——只读路由"不写盘"的判据就是这个前后相等。 */
+async function treeSnapshot(dir) {
+  const out = []
+  async function walk(current) {
+    let entries
+    try {
+      entries = await fsp5.readdir(current, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) {
+        await walk(full)
+        continue
+      }
+      try {
+        const bytes = await fsp5.readFile(full)
+        out.push(path.relative(dir, full).split(path.sep).join('/') + ':' + bytes.length + ':' + sha256Of(bytes))
+      } catch (err) {
+        out.push(path.relative(dir, full).split(path.sep).join('/') + ':unreadable:' + String((err && err.message) || err))
+      }
+    }
+  }
+  await walk(dir)
+  return out.sort()
+}
+
+// ── 5a. 纯函数：状态判定 / 计数 / 当前步骤 / 失败判据（离线，不碰盘）────────────
+console.log('\n5a) 纯函数：状态判定 / 计数 / 当前步骤 / 失败判据（离线）')
+const FAKE_DIR = 'D:/grok-output/rec'
+const FAKE_NOW = Date.parse('2026-09-15T00:05:00.000Z')
+const ledItem = (index, slug, bytes, sha) => ({
+  at: '2026-09-15T00:01:00.000Z',
+  index,
+  slug,
+  file: path.join(FAKE_DIR, String(index).padStart(2, '0') + '-' + slug + '.png'),
+  bytes,
+  sha256: sha,
+  signature: '.png',
+})
+const entries3 = [{ index: 1, slug: 'one', title: '其一', prompt: 'p1' }, { index: 2, slug: 'two', title: '其二', prompt: 'p2' }, { index: 3, slug: 'three', title: '其三', prompt: 'p3' }]
+// 故意塞一把 saveNonce：记录里**不许**出现它（nonce 只沿"派发"那条线走）。
+const plan3 = { batchId: 'rec', createdAt: '2026-09-15T00:00:00.000Z', count: 3, entries: entries3, saveNonce: 'f'.repeat(64) }
+const led3 = { batchId: 'rec', dir: FAKE_DIR, items: [ledItem(1, 'one', 10, 'h1'), ledItem(2, 'two', 20, 'h2'), ledItem(3, 'three', 30, 'h3')], updatedAt: '2026-09-15T00:02:00.000Z' }
+/** 由账本条目造盘上事实；overrides 按序号覆盖（exists/bytes/sha256）。 */
+const diskOf = (ledger, overrides) => {
+  const map = new Map()
+  for (const item of Array.isArray(ledger && ledger.items) ? ledger.items : []) {
+    const patch = (overrides || {})[item.index] || {}
+    map.set(item.file, {
+      exists: patch.exists === undefined ? true : patch.exists,
+      bytes: patch.bytes === undefined ? item.bytes : patch.bytes,
+      sha256: patch.sha256 === undefined ? item.sha256 : patch.sha256,
+    })
+  }
+  return map
+}
+const pure = (input) => {
+  const value = call('buildGrokRunRecord', input)
+  return isObj(value) ? value : {}
+}
+const pureBase = { plan: plan3, ledger: led3, verify: 'sha256', batchId: 'rec', dir: FAKE_DIR, now: FAKE_NOW }
+
+ok('出口：buildGrokRunRecord / applyRunControl / normalizeRunControl / runRetryDriverDoc 都是函数',
+  ['buildGrokRunRecord', 'applyRunControl', 'normalizeRunControl', 'runRetryDriverDoc'].every((k) => has(k, 'function')),
+  ['buildGrokRunRecord', 'applyRunControl', 'normalizeRunControl', 'runRetryDriverDoc'].filter((k) => !has(k, 'function')))
+
+const rOk = pure({ ...pureBase, disk: diskOf(led3) })
+ok('① 全部项都有可校验产物 ⇒ status=succeeded', rOk.status === 'succeeded', rOk.status)
+ok('① 计数 = 总 3 / 成功 3 / 失败 0 / 未跑 0', runCounts(rOk).total === 3 && runCounts(rOk).succeeded === 3 && runCounts(rOk).failed === 0 && runCounts(rOk).missing === 0, runCounts(rOk))
+ok('① 一条记录 = 一个批次：runId 就是 batchId，且标明 kind', rOk.runId === 'rec' && rOk.batchId === 'rec' && rOk.kind === 'grok-batch', [rOk.runId, rOk.kind])
+ok('① 当前步骤 done', runStepId(rOk) === 'done', rOk.step)
+ok('① 产物位置逐项带回（路径/字节/sha256/序号/slug）',
+  runArtifacts(rOk).length === 3 && at(runArtifacts(rOk), 0).file === ledItem(1, 'one', 10, 'h1').file
+  && at(runArtifacts(rOk), 0).bytes === 10 && at(runArtifacts(rOk), 0).sha256 === 'h1' && at(runArtifacts(rOk), 0).index === 1
+  && at(runArtifacts(rOk), 2).slug === 'three' && at(runArtifacts(rOk), 0).relFile === '01-one.png',
+  at(runArtifacts(rOk), 0))
+ok('① failures 为空、warnings 为空（没东西可重跑、也没什么可解释的）', runFailures(rOk).length === 0 && runWarnings(rOk).length === 0, runWarnings(rOk))
+ok('① 记录里不含 nonce（记录不是钥匙的运输通道）', JSON.stringify(rOk).includes('saveNonce') === false && JSON.stringify(rOk).includes('f'.repeat(64)) === false)
+ok('① 开始/更新时间取自事实（plan.createdAt → 最后一条产物时间）', rOk.startedAt === plan3.createdAt && rOk.updatedAt === led3.updatedAt, [rOk.startedAt, rOk.updatedAt])
+ok('① 记录里写明三份文件的位置（plan/ledger/run）',
+  rOk.planFile === path.join(FAKE_DIR, 'plan.json') && rOk.ledgerFile === path.join(FAKE_DIR, 'ledger.json') && rOk.runFile === path.join(FAKE_DIR, 'run.json'), [rOk.planFile, rOk.runFile])
+
+const ledPart = { ...led3, items: [ledItem(1, 'one', 10, 'h1'), ledItem(2, 'two', 20, 'h2')] }
+const rPart = pure({ ...pureBase, ledger: ledPart, disk: diskOf(ledPart, { 2: { exists: false } }) })
+ok('② 一成一坏一未跑 ⇒ status=partial', rPart.status === 'partial', rPart.status)
+ok('② 计数 = 总 3 / 成功 1 / 失败 1 / 未跑 1（恒等式 成功+失败+未跑=总数）',
+  runCounts(rPart).total === 3 && runCounts(rPart).succeeded === 1 && runCounts(rPart).failed === 1 && runCounts(rPart).missing === 1
+  && runCounts(rPart).succeeded + runCounts(rPart).failed + runCounts(rPart).missing === runCounts(rPart).total, runCounts(rPart))
+ok('② 失败项清单按序号排、判据分开：坏的那项 file-missing、没跑的那项 never-run',
+  runFailures(rPart).length === 2 && at(runFailures(rPart), 0).index === 2 && reasonOf(at(runFailures(rPart), 0)) === 'file-missing'
+  && at(runFailures(rPart), 1).index === 3 && reasonOf(at(runFailures(rPart), 1)) === 'never-run',
+  runFailures(rPart).map((f) => [f.index, f.reason]))
+ok('② 失败原因带一句人话（不只是个枚举名）',
+  runFailures(rPart).every((f) => typeof f.detail === 'string' && f.detail.length > 8), runFailures(rPart).map((f) => f.detail))
+ok('② 没跑那项的"该落在哪"按 driver.md 的命名规矩推（03-three.png）',
+  at(runFailures(rPart), 1).expectedFile === path.join(FAKE_DIR, '03-three.png'), at(runFailures(rPart), 1).expectedFile)
+ok('② 坏掉那项的产物位置 = 账本记的路径（位置本来就是对的，是文件没了）',
+  at(runFailures(rPart), 0).file === ledItem(2, 'two', 20, 'h2').file && at(runFailures(rPart), 0).expectedFile === ledItem(2, 'two', 20, 'h2').file,
+  at(runFailures(rPart), 0))
+ok('② 当前步骤 collect：收图中，已落 1 / 共 3（还差 2 项）',
+  runStepId(rPart) === 'collect' && /已落 1 \/ 3/.test(runStepLabel(rPart)) && /还差 2 项/.test(runStepLabel(rPart)), runStepLabel(rPart))
+
+const rBytes = pure({ ...pureBase, disk: diskOf(led3, { 2: { bytes: 999 } }) })
+ok('② 字节数不符 ⇒ 失败项 reason=bytes-mismatch（stat 档也抓得到）',
+  rBytes.status === 'partial' && reasonOf(runFailures(rBytes).find((f) => isObj(f) && f.index === 2)) === 'bytes-mismatch',
+  runFailures(rBytes).map((f) => [f.index, f.reason]))
+const rSha = pure({ ...pureBase, disk: diskOf(led3, { 3: { sha256: 'deadbeef' } }) })
+ok('② 哈希不符 ⇒ 失败项 reason=sha256-mismatch（sha256 档才查得出）',
+  rSha.status === 'partial' && reasonOf(runFailures(rSha).find((f) => isObj(f) && f.index === 3)) === 'sha256-mismatch',
+  runFailures(rSha).map((f) => [f.index, f.reason]))
+const rShaStat = pure({ ...pureBase, verify: 'stat', disk: diskOf(led3, { 3: { sha256: 'deadbeef' } }) })
+ok('② 同一盘上事实在 stat 档看不出来（两档的差别是真的，不是文案差别）', rShaStat.status === 'succeeded', rShaStat.status)
+
+const singleLed = { ...led3, items: [ledItem(1, 'one', 10, 'h1')] }
+const rFail = pure({ ...pureBase, ledger: singleLed, disk: diskOf(singleLed, { 1: { exists: false } }) })
+ok('② 一项都没成且有真失败 ⇒ status=failed、步骤 verify',
+  rFail.status === 'failed' && runStepId(rFail) === 'verify' && runCounts(rFail).failed === 1 && runCounts(rFail).missing === 2,
+  { status: rFail.status, counts: runCounts(rFail), step: runStepId(rFail) })
+const rPending = pure({ ...pureBase, ledger: { items: [], updatedAt: '' }, disk: new Map() })
+ok('② 一项都没跑 ⇒ status=pending、步骤 plan（批次已建立、待派发）',
+  rPending.status === 'pending' && runStepId(rPending) === 'plan' && runCounts(rPending).missing === 3, { status: rPending.status, step: runStepId(rPending) })
+
+const cancelControl = { running: null, cancelled: { at: '2026-09-15T00:04:00.000Z', by: 'probe', reason: '用户叫停' }, history: [{ action: 'cancel', at: '2026-09-15T00:04:00.000Z', by: 'probe', reason: '用户叫停' }] }
+const rCancel = pure({ ...pureBase, ledger: ledPart, disk: diskOf(ledPart, { 2: { exists: false } }), control: cancelControl })
+ok('④ 有取消标记 ⇒ status=cancelled（哪怕已经落了一半图）', rCancel.status === 'cancelled', rCancel.status)
+ok('④ 取消的"谁/何时/为什么"进记录，且写进当前步骤那句话里',
+  runMark(rCancel, 'cancelled').by === 'probe' && runMark(rCancel, 'cancelled').at === '2026-09-15T00:04:00.000Z'
+  && runStepId(rCancel) === 'cancelled' && /probe/.test(runStepLabel(rCancel)) && /用户叫停/.test(runStepLabel(rCancel)),
+  { cancelled: runMark(rCancel, 'cancelled'), step: rCancel.step })
+ok('④ 取消不动计数（取消是状态标记，不是"把没跑的当成功"）', runCounts(rCancel).total === 3 && runCounts(rCancel).succeeded === 1 && runCounts(rCancel).missing === 1, runCounts(rCancel))
+const runControlRunning = { running: { at: '2026-09-15T00:04:00.000Z', by: 'session', reason: '' }, cancelled: null, history: [] }
+const rRunning = pure({ ...pureBase, ledger: ledPart, disk: diskOf(ledPart, { 2: { exists: false } }), control: runControlRunning })
+ok('④ 登记过 begin ⇒ status=running、步骤 dispatch（宿主看不到那个浏览器会话，所以只认显式登记）',
+  rRunning.status === 'running' && runStepId(rRunning) === 'dispatch' && /session/.test(runStepLabel(rRunning)), rRunning.step)
+const rStale = pure({ ...pureBase, ledger: ledPart, disk: diskOf(ledPart, { 2: { exists: false } }), control: runControlRunning, now: Date.parse('2026-09-15T05:00:00.000Z') })
+ok('④ begin 过期（默认 2 小时）就不再算运行中，退回由事实推导的状态，并留一句警告',
+  rStale.status === 'partial' && runWarnings(rStale).some((w) => /不再算运行中/.test(w)), { status: rStale.status, warnings: runWarnings(rStale) })
+
+const ledOrphan = { ...led3, items: [...led3.items, ledItem(9, 'manual', 40, 'h9')] }
+const rOrphan = pure({ ...pureBase, ledger: ledOrphan, disk: diskOf(ledOrphan) })
+ok('② 账上有、计划里没有的产物 ⇒ 记进 orphans 并留警告，**不**污染成功/失败计数',
+  runCounts(rOrphan).total === 3 && runCounts(rOrphan).succeeded === 3 && runCounts(rOrphan).orphan === 1
+  && runWarnings(rOrphan).some((w) => /不在本批计划里/.test(w)), { counts: runCounts(rOrphan), warnings: runWarnings(rOrphan) })
+const ledDup = { ...led3, items: [ledItem(2, 'two', 20, 'h2'), ledItem(2, 'two', 20, 'h2')] }
+const rDup = pure({ ...pureBase, ledger: ledDup, disk: diskOf(ledDup) })
+ok('② 同一序号重存多次时以账本**最后一条**为准（前面的已被覆盖，不算重复成功）',
+  runCounts(rDup).succeeded === 1 && runArtifacts(rDup).length === 1 && at(runArtifacts(rDup), 0).index === 2, runCounts(rDup))
+
+// 三个动作的语义（纯函数）
+const applyRun = (raw, action, opts) => {
+  const value = call('applyRunControl', raw, action, opts)
+  return isObj(value) ? value : {}
+}
+const begin1 = applyRun(null, 'begin', { at: '2026-09-15T01:00:00.000Z', by: 'session' })
+const cancel1 = applyRun(begin1.control, 'cancel', { at: '2026-09-15T01:05:00.000Z', by: 'user', reason: '先停一下' })
+const resume1 = applyRun(cancel1.control, 'begin', { at: '2026-09-15T01:10:00.000Z', by: 'plan-reissue', reason: '续跑' })
+const clear1 = applyRun(cancel1.control, 'clear', { at: '2026-09-15T01:20:00.000Z', by: 'session' })
+ok('④ 动作出口：begin 登记 running、cancel 登记 cancelled 并清掉 running',
+  isObj(begin1.control) && isObj(begin1.control.running) && isObj(cancel1.control)
+  && cancel1.control.cancelled !== null && cancel1.control.running === null,
+  { begin: begin1.control && begin1.control.running, cancel: cancel1.control && cancel1.control.cancelled })
+ok('④ begin 会解掉取消标记并留一条 resume（取消过不该永远不能再跑）',
+  isObj(resume1.control) && resume1.control.cancelled === null && resume1.control.running.by === 'plan-reissue'
+  && hasAction(resume1.control.history, 'resume') && resume1.control.history.filter((h) => h.action === 'begin').length === 2,
+  asList(resume1.control && resume1.control.history).map((h) => h.action))
+ok('④ clear 把两个标记都清掉（误标一次不至于让这一批废掉）',
+  isObj(clear1.control) && clear1.control.running === null && clear1.control.cancelled === null && hasAction(clear1.control.history, 'clear'))
+ok('④ 历史里每一次"谁/何时/做了什么"都留着（by/reason 都记）',
+  isObj(cancel1.control) && asList(cancel1.control.history).some((h) => isObj(h) && h.action === 'cancel' && h.by === 'user' && h.reason === '先停一下' && h.at === '2026-09-15T01:05:00.000Z'),
+  cancel1.control && cancel1.control.history)
+ok('④ 不认识的 action 报错而不是静默当成 clear', typeof applyRun(null, 'nuke').error === 'string' && typeof applyRun(null, '').error === 'string',
+  applyRun(null, 'nuke').error)
+
+// ── 5b. 端到端：一次成功批次 ────────────────────────────────────────────────
+console.log('\n5b) 端到端：一次成功批次 ⇒ succeeded 且产物齐全')
+const planOkBody = {
+  slug: 'rec-ok',
+  grokUrl: 'https://grok.com/',
+  entries: [{ index: 1, slug: 'one', title: '其一', prompt: '雨夜门廊，暖黄门灯，竖版构图。' }, { index: 2, slug: 'two', title: '其二', prompt: '巷口回头，冷调蓝紫，浅景深。' }],
+}
+const madeOk = await postJson(planUrl(), planOkBody)
+const okDir = typeof madeOk.body.dir === 'string' ? madeOk.body.dir : ''
+const okId = typeof madeOk.body.batchId === 'string' ? madeOk.body.batchId : ''
+const okNonce = typeof madeOk.body.saveNonce === 'string' ? madeOk.body.saveNonce : ''
+ok('① 建批次响应带 runFile 与 record（此刻还没图 ⇒ pending / 待派发）',
+  madeOk.status === 200 && madeOk.body.ok === true && typeof madeOk.body.runFile === 'string'
+  && isObj(madeOk.body.record) && madeOk.body.record.status === 'pending' && runStepId(madeOk.body.record) === 'plan',
+  { status: madeOk.status, runFile: madeOk.body.runFile, record: madeOk.body.record && madeOk.body.record.status })
+const imgOk1 = fakePng(320, 480, 2048, 0x5a5a0001)
+const imgOk2 = fakeJpeg(640, 360, 3072, 0x5a5a0002)
+const okSha1 = sha256Of(imgOk1)
+const savedOk1 = await saveRaw(imgOk1, 'batch=' + encodeURIComponent(okId) + '&index=1&slug=one&nonce=' + encodeURIComponent(okNonce))
+ok('① 存图响应带上记录侧进度（run/runStatus/remaining），老字段一个没动',
+  savedOk1.status === 200 && savedOk1.body.status === 'saved' && savedOk1.body.bytes === imgOk1.length
+  && typeof savedOk1.body.run === 'string' && savedOk1.body.runStatus === 'partial' && savedOk1.body.remaining === 1,
+  { status: savedOk1.status, runStatus: savedOk1.body.runStatus, remaining: savedOk1.body.remaining })
+await saveRaw(imgOk2, 'batch=' + encodeURIComponent(okId) + '&index=2&slug=two&ext=.jpg&nonce=' + encodeURIComponent(okNonce))
+const recOk = await getJson(runUrl('batch=' + encodeURIComponent(okId)))
+ok('① status=succeeded、计数 2/2/0/0', recOk.status === 200 && recOk.body.status === 'succeeded'
+  && runCounts(recOk.body).total === 2 && runCounts(recOk.body).succeeded === 2 && runCounts(recOk.body).failed === 0 && runCounts(recOk.body).missing === 0,
+  { status: recOk.status, body: recOk.body.status, counts: runCounts(recOk.body) })
+ok('① 产物位置 + 字节 + sha256 + 尺寸逐项对得上（sha256 档是**重算**出来的）',
+  runArtifacts(recOk.body).length === 2 && at(runArtifacts(recOk.body), 0).bytes === imgOk1.length
+  && at(runArtifacts(recOk.body), 0).sha256 === okSha1 && at(runArtifacts(recOk.body), 0).verified === 'sha256'
+  && at(runArtifacts(recOk.body), 1).sha256 === sha256Of(imgOk2) && recOk.body.verify === 'sha256',
+  runArtifacts(recOk.body).map((a) => [a.index, a.bytes, String(a.sha256).slice(0, 8)]))
+ok('① 产物位置就是本批目录里的那两张（每批一个目录的语义没被绕开）',
+  runArtifacts(recOk.body).every((a) => path.dirname(a.file) === okDir) && at(runArtifacts(recOk.body), 0).relFile === '01-one.png'
+  && at(runArtifacts(recOk.body), 1).relFile === '02-two.jpg', runArtifacts(recOk.body).map((a) => a.relFile))
+ok('① failures 为空、当前步骤 done', runFailures(recOk.body).length === 0 && runStepId(recOk.body) === 'done', { failures: runFailures(recOk.body).length, step: runStepId(recOk.body) })
+ok('① 只读查询不吐 nonce（门②那件事不许被新路由绕开）',
+  JSON.stringify(recOk.body).includes(okNonce) === false && okNonce.length >= 32, okNonce.length)
+const runFileOnDisk = path.join(okDir, 'run.json')
+const diskRecord = existsSync(runFileOnDisk) ? JSON.parse(await fsp5.readFile(runFileOnDisk, 'utf8')) : {}
+ok('① run.json 真的落盘了，且与查询口径一致（落盘与查询同一份推导）',
+  isObj(diskRecord) && diskRecord.status === 'succeeded' && diskRecord.batchId === okId
+  && isObj(diskRecord.counts) && diskRecord.counts.succeeded === 2, diskRecord && diskRecord.status)
+ok('① 落盘的 run.json 里也没有 nonce', JSON.stringify(diskRecord).includes(okNonce) === false)
+const viaPlan = await getJson(planUrl('batch=' + encodeURIComponent(okId)))
+ok('① 既有只读路由 GET /dvp/grok/plan 顺带带回同一份 record（不用打两次）',
+  viaPlan.status === 200 && isObj(viaPlan.body.record) && viaPlan.body.record.status === 'succeeded'
+  && viaPlan.body.record.batchId === okId && JSON.stringify(viaPlan.body.record).includes(okNonce) === false,
+  viaPlan.body.record && viaPlan.body.record.status)
+
+// ── 5c. 端到端：部分缺图 ⇒ partial + 失败项清单 + 续跑/仅重试失败项 ───────────
+console.log('\n5c) 端到端：部分缺图 ⇒ partial；续跑与"仅重试失败项"')
+const entriesPart = [
+  { index: 1, slug: 'one', title: '其一', prompt: '雨夜门廊，暖黄门灯，竖版构图。' },
+  { index: 2, slug: 'two', title: '其二', prompt: '巷口回头，冷调蓝紫，浅景深。' },
+  { index: 3, slug: 'three', title: '其三', prompt: '荧光药剂，青绿光自下而上。' },
+]
+const madePart = await postJson(planUrl(), { slug: 'rec-partial', grokUrl: 'https://grok.com/', entries: entriesPart })
+const partDir = typeof madePart.body.dir === 'string' ? madePart.body.dir : ''
+const partId = typeof madePart.body.batchId === 'string' ? madePart.body.batchId : ''
+const partNonce = typeof madePart.body.saveNonce === 'string' ? madePart.body.saveNonce : ''
+const imgPart1 = fakePng(200, 300, 1536, 0x6b6b0001)
+const imgPart2 = fakePng(200, 300, 1536, 0x6b6b0002)
+const imgPart3 = fakePng(200, 300, 1536, 0x6b6b0003)
+const savedPart1 = await saveRaw(imgPart1, 'batch=' + encodeURIComponent(partId) + '&index=1&slug=one&nonce=' + encodeURIComponent(partNonce))
+const savedPart2 = await saveRaw(imgPart2, 'batch=' + encodeURIComponent(partId) + '&index=2&slug=two&nonce=' + encodeURIComponent(partNonce))
+const partFile1 = typeof savedPart1.body.file === 'string' ? savedPart1.body.file : ''
+const partFile2 = typeof savedPart2.body.file === 'string' ? savedPart2.body.file : ''
+ok('② 两项落图成功（其中一项马上会被我们删掉，模拟产物丢失）',
+  savedPart1.status === 200 && savedPart2.status === 200 && partFile1 !== '' && partFile2 !== '', [savedPart1.status, savedPart2.status])
+const partSha1 = sha256Of(imgPart1)
+const mtimePart1Before = partFile1 !== '' && existsSync(partFile1) ? (await fsp5.stat(partFile1)).mtimeMs : 0
+if (partFile2 !== '') await fsp5.rm(partFile2, { force: true })
+const recPart = await getJson(runUrl('batch=' + encodeURIComponent(partId)))
+ok('② status=partial，计数 3/1/1/1',
+  recPart.status === 200 && recPart.body.status === 'partial' && runCounts(recPart.body).total === 3
+  && runCounts(recPart.body).succeeded === 1 && runCounts(recPart.body).failed === 1 && runCounts(recPart.body).missing === 1,
+  { status: recPart.body && recPart.body.status, counts: runCounts(recPart.body) })
+ok('② 失败项清单 = [2 file-missing, 3 never-run]（清单就是"仅重试失败项"的输入）',
+  runFailures(recPart.body).length === 2 && at(runFailures(recPart.body), 0).index === 2 && reasonOf(at(runFailures(recPart.body), 0)) === 'file-missing'
+  && at(runFailures(recPart.body), 1).index === 3 && reasonOf(at(runFailures(recPart.body), 1)) === 'never-run',
+  runFailures(recPart.body).map((f) => [f.index, f.reason]))
+ok('② 产物位置正确：成功的那项指回本批目录里的真文件，坏的那项指回账本记的路径',
+  runArtifacts(recPart.body).length === 1 && at(runArtifacts(recPart.body), 0).file === partFile1
+  && at(runArtifacts(recPart.body), 0).sha256 === partSha1 && at(runFailures(recPart.body), 0).file === partFile2,
+  { artifacts: runArtifacts(recPart.body).map((a) => a.relFile), lost: at(runFailures(recPart.body), 0).file })
+ok('② 当前步骤 collect（已落 1 / 共 3，还差 2）', runStepId(recPart.body) === 'collect' && /已落 1 \/ 3/.test(runStepLabel(recPart.body)), runStepLabel(recPart.body))
+
+const recPartDriver = await getJson(runUrl('batch=' + encodeURIComponent(partId) + '&driver=1'))
+const driverText = typeof recPartDriver.body.retryDriver === 'string' ? recPartDriver.body.retryDriver : ''
+ok('③ driver=1 给出"仅重试失败项"清单（默认响应里没有这段，按需才带）',
+  recPartDriver.status === 200 && driverText.length > 0 && typeof recPart.body.retryDriver === 'undefined', driverText.slice(0, 60))
+ok('③ 清单只含该重跑的两项（02 / 03），**不含**已成功的那项（01）',
+  driverText.includes('02. 其二') && driverText.includes('03. 其三') && !driverText.includes('01. 其一'),
+  driverText.split('\n').filter((l) => l.startsWith('### ')))
+ok('③ 清单写明"只重跑 2 项、已成功的 1 项不再投、不新建批次"',
+  /只重跑下面 2 项/.test(driverText) && /不新建批次/.test(driverText) && /已成功的那 1 项/.test(driverText))
+ok('③ 重跑命令复用既有 batch= 机制（同一批、同一目录），并逐项带上序号/slug',
+  driverText.includes('batch=' + partId + '&index=2&slug=two') && driverText.includes('batch=' + partId + '&index=3&slug=three')
+  && driverText.includes('/dvp/grok/save'))
+ok('③ 清单里没有 nonce 本身（只指向本批 plan.json 去读），也没有把 base64 搬回会话的写法',
+  driverText.includes(partNonce) === false && driverText.includes(path.join(partDir, 'plan.json')) && b64Total(driverText) === 0)
+ok('③ 清单带上每一项的提示词正文（重跑时不用再翻别的地方）',
+  driverText.includes('巷口回头，冷调蓝紫，浅景深。') && driverText.includes('荧光药剂，青绿光自下而上。')
+  && !driverText.includes('雨夜门廊，暖黄门灯，竖版构图。'))
+
+// 续跑：对**同一个批次**重发 plan（既有机制）⇒ 写回同一目录、不新建、并登记 begin（续跑这件事本身）
+const dirsBeforeResume = (await fsp5.readdir(RUN_ROOT, { withFileTypes: true })).filter((e) => e.isDirectory()).length
+const resumed = await postJson(planUrl(), { batchId: partId, slug: 'rec-partial', grokUrl: 'https://grok.com/', entries: entriesPart })
+const dirsAfterResume = (await fsp5.readdir(RUN_ROOT, { withFileTypes: true })).filter((e) => e.isDirectory()).length
+const resumeNonce = typeof resumed.body.saveNonce === 'string' ? resumed.body.saveNonce : ''
+ok('③ 续跑 = 对同一批次重发 plan：写回同一目录、不新建目录、总数不变',
+  resumed.status === 200 && resumed.body.dir === partDir && resumed.body.batchId === partId
+  && resumed.body.count === 3 && dirsAfterResume === dirsBeforeResume, { dir: resumed.body.dir, before: dirsBeforeResume, after: dirsAfterResume })
+const recResumed = await getJson(runUrl('batch=' + encodeURIComponent(partId) + '&verify=stat'))
+ok('③ 续跑被登记成 running（谁登记的、何时开始，记录里都有）',
+  recResumed.status === 200 && recResumed.body.status === 'running' && runMark(recResumed.body, 'running').by === 'plan-reissue'
+  && hasAction(runHistory(recResumed.body), 'begin'),
+  { status: recResumed.body && recResumed.body.status, running: runMark(recResumed.body, 'running'), history: runHistory(recResumed.body).map((h) => h.action) })
+ok('③ 续跑不动已成功的那项：它还在产物清单里，sha256 与刚才一致',
+  runArtifacts(recResumed.body).length === 1 && at(runArtifacts(recResumed.body), 0).sha256 === partSha1 && runCounts(recResumed.body).succeeded === 1,
+  runArtifacts(recResumed.body).map((a) => a.relFile))
+// 只补失败的那两项（用新 nonce，走同一批）
+await saveRaw(imgPart2, 'batch=' + encodeURIComponent(partId) + '&index=2&slug=two&nonce=' + encodeURIComponent(resumeNonce))
+const finalSave = await saveRaw(imgPart3, 'batch=' + encodeURIComponent(partId) + '&index=3&slug=three&nonce=' + encodeURIComponent(resumeNonce))
+const recDone = await getJson(runUrl('batch=' + encodeURIComponent(partId)))
+ok('③ 只重跑那两项之后 status=succeeded、计数 3/3/0/0、failures 空（续跑真的把批补齐了）',
+  recDone.status === 200 && recDone.body.status === 'succeeded' && runCounts(recDone.body).succeeded === 3
+  && runCounts(recDone.body).failed === 0 && runCounts(recDone.body).missing === 0 && runFailures(recDone.body).length === 0,
+  { status: recDone.body && recDone.body.status, counts: runCounts(recDone.body) })
+ok('③ 补的那两张都落在本批目录（没另起目录、没盖掉第一张）',
+  runArtifacts(recDone.body).length === 3 && runArtifacts(recDone.body).every((a) => path.dirname(a.file) === partDir)
+  && at(runArtifacts(recDone.body), 0).sha256 === partSha1 && at(runArtifacts(recDone.body), 1).sha256 === sha256Of(imgPart2)
+  && at(runArtifacts(recDone.body), 2).file === finalSave.body.file,
+  runArtifacts(recDone.body).map((a) => a.relFile))
+const mtimePart1After = partFile1 !== '' && existsSync(partFile1) ? (await fsp5.stat(partFile1)).mtimeMs : 0
+ok('③ 续跑/补图全程没重写已成功的那张图（mtime 都没变）',
+  mtimePart1Before > 0 && mtimePart1After === mtimePart1Before, { before: mtimePart1Before, after: mtimePart1After })
+
+// ── 5d. 取消：只记语义（谁 / 何时 / 为什么），不动产物 ────────────────────────
+console.log('\n5d) 取消：显式记录 cancelled 语义（没有真中断机制，也不新造杀进程逻辑）')
+const entriesCancel = [
+  { index: 1, slug: 'one', title: '其一', prompt: '雨夜门廊，暖黄门灯。' },
+  { index: 2, slug: 'two', title: '其二', prompt: '巷口回头，冷调蓝紫。' },
+]
+const madeCancel = await postJson(planUrl(), { slug: 'rec-cancel', grokUrl: 'https://grok.com/', entries: entriesCancel })
+const cancelDir = typeof madeCancel.body.dir === 'string' ? madeCancel.body.dir : ''
+const cancelId = typeof madeCancel.body.batchId === 'string' ? madeCancel.body.batchId : ''
+const cancelNonce = typeof madeCancel.body.saveNonce === 'string' ? madeCancel.body.saveNonce : ''
+const imgCancel = fakePng(128, 128, 1024, 0x7c7c0001)
+const savedCancel = await saveRaw(imgCancel, 'batch=' + encodeURIComponent(cancelId) + '&index=1&slug=one&nonce=' + encodeURIComponent(cancelNonce))
+const cancelFile = typeof savedCancel.body.file === 'string' ? savedCancel.body.file : ''
+const cancelShaBefore = cancelFile !== '' && existsSync(cancelFile) ? sha256Of(await fsp5.readFile(cancelFile)) : ''
+const cancelMtimeBefore = cancelFile !== '' && existsSync(cancelFile) ? (await fsp5.stat(cancelFile)).mtimeMs : 0
+const cancelled = await postJson(runUrl(), { batchId: cancelId, action: 'cancel', by: 'probe', reason: '用户叫停' })
+ok('④ 登记取消返回 status=cancelled，并写明谁/何时/为什么',
+  cancelled.status === 200 && cancelled.body.status === 'cancelled'
+  && runMark(cancelled.body, 'cancelled').by === 'probe'
+  && String(runMark(cancelled.body, 'cancelled').reason) === '用户叫停'
+  && Number.isFinite(Date.parse(String(runMark(cancelled.body, 'cancelled').at))),
+  { status: cancelled.body && cancelled.body.status, cancelled: runMark(cancelled.body, 'cancelled') })
+ok('④ 当前步骤那句话就是"已取消（谁 于 何时：为什么）"',
+  runStepId(cancelled.body) === 'cancelled' && /probe/.test(runStepLabel(cancelled.body)) && /用户叫停/.test(runStepLabel(cancelled.body)), runStepLabel(cancelled.body))
+ok('④ 历史里留下这一条（谁做的、何时、做了什么）',
+  runHistory(cancelled.body).some((h) => isObj(h) && h.action === 'cancel' && h.by === 'probe' && h.reason === '用户叫停'),
+  runHistory(cancelled.body))
+ok('④ 取消**不动产物**：那张图还在、字节与 sha256 一个字没变，计数也照旧',
+  cancelFile !== '' && existsSync(cancelFile) && sha256Of(await fsp5.readFile(cancelFile)) === cancelShaBefore
+  && (await fsp5.stat(cancelFile)).mtimeMs === cancelMtimeBefore
+  && runCounts(cancelled.body).total === 2 && runCounts(cancelled.body).succeeded === 1 && runCounts(cancelled.body).missing === 1,
+  { file: cancelFile, sha: String(cancelShaBefore).slice(0, 8), counts: runCounts(cancelled.body) })
+const cancelDisk = cancelDir !== '' && existsSync(path.join(cancelDir, 'run.json'))
+  ? JSON.parse(await fsp5.readFile(path.join(cancelDir, 'run.json'), 'utf8'))
+  : {}
+ok('④ 取消落到盘上（run.json 里就是 cancelled + 那条 control）',
+  isObj(cancelDisk) && cancelDisk.status === 'cancelled' && isObj(cancelDisk.control) && isObj(cancelDisk.control.cancelled)
+  && cancelDisk.control.cancelled.by === 'probe', cancelDisk && cancelDisk.status)
+const cleared = await postJson(runUrl(), { batchId: cancelId, action: 'clear', by: 'probe', reason: '误标' })
+ok('④ clear 之后退回按事实推导的状态（partial：1 成一未跑）',
+  cleared.status === 200 && cleared.body.status === 'partial' && runControl(cleared.body).cancelled === null, { status: cleared.body && cleared.body.status })
+const cancelled2 = await postJson(runUrl(), { batchId: cancelId, action: 'cancel', by: 'probe' })
+const resumedAfterCancel = await postJson(planUrl(), { batchId: cancelId, slug: 'rec-cancel', grokUrl: 'https://grok.com/', entries: entriesCancel })
+const afterCancelResume = await getJson(runUrl('batch=' + encodeURIComponent(cancelId)))
+ok('④ 取消之后重发 plan = 续跑：取消标记被解掉，历史里留一条 resume（"取消过就永远不能再跑"不成立）',
+  cancelled2.body.status === 'cancelled' && resumedAfterCancel.status === 200
+  && afterCancelResume.body.status === 'running' && runControl(afterCancelResume.body).cancelled === null
+  && hasAction(runHistory(afterCancelResume.body), 'resume'),
+  { status: afterCancelResume.body && afterCancelResume.body.status, history: runHistory(afterCancelResume.body).map((h) => h.action) })
+const badAction = await postJson(runUrl(), { batchId: cancelId, action: 'nuke' })
+const noBatch = await postJson(runUrl(), { action: 'cancel' })
+const unknownBatch = await postJson(runUrl(), { batchId: 'no-such-batch-here', action: 'cancel' })
+const legacyControl = await postJson(runUrl(), { batchId: 'legacy', action: 'cancel' })
+ok('④ 坏输入都有明确拒绝：未知动作 400 / 没给批次 400 / 批次不存在 404 / legacy 只读别名 400',
+  badAction.status === 400 && noBatch.status === 400 && unknownBatch.status === 404 && legacyControl.status === 400,
+  { badAction: badAction.status, noBatch: noBatch.status, unknownBatch: unknownBatch.status, legacy: legacyControl.status })
+ok('④ 被拒的登记没有在盘上留下任何东西（那个批次目录根本没被建出来）',
+  !existsSync(path.join(RUN_ROOT, 'no-such-batch-here')) && /不存在/.test(String(unknownBatch.body.error || '')),
+  unknownBatch.body.error)
+
+// ── 5e. 向后兼容：旧批次（没有 run.json、账本条目是旧字段）仍能读 ─────────────
+console.log('\n5e) 向后兼容：旧批次没有 run.json 也读得出来，且读它不会"补"出一份 run.json')
+const oldDir = path.join(RUN_ROOT, '2026-09-01_0000-old-shape')
+await fsp5.mkdir(oldDir, { recursive: true })
+// 旧形状的 plan.json（没有 batchId/saveNonce 之外的新字段）与旧形状的账本（条目里没有 signature）
+const oldPlan = {
+  createdAt: '2026-09-01T00:00:00.000Z',
+  dir: oldDir,
+  count: 2,
+  entries: [{ index: 1, slug: 'old-one', title: '旧其一', prompt: '旧提示词一' }, { index: 2, slug: 'old-two', title: '旧其二', prompt: '旧提示词二' }],
+}
+const oldBytes = fakePng(64, 64, 1024, 0x8d8d0001)
+const oldFile = path.join(oldDir, '01-old-one.png')
+await fsp5.writeFile(oldFile, oldBytes)
+await fsp5.writeFile(path.join(oldDir, 'plan.json'), JSON.stringify(oldPlan, null, 2), 'utf8')
+await fsp5.writeFile(path.join(oldDir, 'ledger.json'), JSON.stringify({
+  items: [{ at: '2026-09-01T00:01:00.000Z', index: 1, slug: 'old-one', file: oldFile, bytes: oldBytes.length, sha256: sha256Of(oldBytes) }],
+  updatedAt: '2026-09-01T00:01:00.000Z',
+}, null, 2), 'utf8')
+const oldId = '2026-09-01_0000-old-shape'
+const recOld = await getJson(runUrl('batch=' + encodeURIComponent(oldId)))
+ok('⑥ 旧批次读得出记录：status=partial、计数 2/1/0/1（按 plan + 旧账本推导）',
+  recOld.status === 200 && recOld.body.status === 'partial' && runCounts(recOld.body).total === 2
+  && runCounts(recOld.body).succeeded === 1 && runCounts(recOld.body).missing === 1, { status: recOld.body && recOld.body.status, counts: runCounts(recOld.body) })
+ok('⑥ 旧账本条目（没有 signature 等新字段）照样计入产物，位置/字节/sha256 都对得上',
+  runArtifacts(recOld.body).length === 1 && runArtifacts(recOld.body)[0].file === oldFile
+  && runArtifacts(recOld.body)[0].sha256 === sha256Of(oldBytes) && runArtifacts(recOld.body)[0].bytes === oldBytes.length,
+  runArtifacts(recOld.body))
+ok('⑥ 它标成 derived（盘上本来就没有 run.json 这一份），当前步骤 collect（已落 1 / 共 2）',
+  recOld.body.source === 'derived' && runStepId(recOld.body) === 'collect' && /已落 1 \/ 2/.test(runStepLabel(recOld.body)),
+  { source: recOld.body.source, step: runStepLabel(recOld.body) })
+ok('⑥ 读旧批次**不会**给它凭空补一份 run.json（只读就是不写）', !existsSync(path.join(oldDir, 'run.json')))
+ok('⑥ 旧批次的 plan.json / ledger.json 一个字节没被动过（哈希与刚写的相同）',
+  sha256Of(await fsp5.readFile(path.join(oldDir, 'plan.json'))) === sha256Of(Buffer.from(JSON.stringify(oldPlan, null, 2), 'utf8'))
+  && JSON.parse(await fsp5.readFile(path.join(oldDir, 'ledger.json'), 'utf8')).items.length === 1)
+const oldPlanRead = await getJson(planUrl('batch=' + encodeURIComponent(oldId)))
+ok('⑥ 既有路由也仍然读得回这一批（老字段口径没变）',
+  oldPlanRead.status === 200 && isObj(oldPlanRead.body.plan) && oldPlanRead.body.plan.count === 2
+  && oldPlanRead.body.plan.entries[0].title === '旧其一', oldPlanRead.body.plan && oldPlanRead.body.plan.count)
+
+// ── 5f. 列表路由：最近若干批 ────────────────────────────────────────────────
+console.log('\n5f) /dvp/grok/runs · 最近若干批（只读，stat 档）')
+const listAll = await getJson(runsUrl())
+const listBatches = runBatches(listAll.body)
+const listIds = listBatches.map((b) => b.batchId)
+ok('列表读出最近若干批，含我们刚建的这几批（含旧形状那批）',
+  listAll.status === 200 && listAll.body.ok === true && [okId, partId, cancelId, oldId].every((id) => listIds.includes(id)), listIds.slice(0, 8))
+ok('每一批都带状态/当前步骤/计数/待重跑条数',
+  listBatches.length > 0 && listBatches.every((b) => typeof b.status === 'string'
+    && isObj(b.step) && typeof b.step.id === 'string' && isObj(b.counts) && typeof b.retryCount === 'number'), listBatches[0])
+ok('状态只可能是那六个之一（不出现自造状态）',
+  listBatches.length > 0 && listBatches.every((b) => ['pending', 'running', 'partial', 'succeeded', 'failed', 'cancelled'].includes(b.status)),
+  listBatches.map((b) => b.status))
+ok('列表的 stat 档与明细的 sha256 档结论一致（两档只是校验强度不同，不是口径不同）',
+  (listBatches.find((b) => b.batchId === okId) || {}).status === 'succeeded'
+  && (listBatches.find((b) => b.batchId === cancelId) || {}).status === afterCancelResume.body.status,
+  { ok: (listBatches.find((b) => b.batchId === okId) || {}).status, cancel: (listBatches.find((b) => b.batchId === cancelId) || {}).status })
+const listTwo = await getJson(runsUrl('limit=2'))
+ok('limit 生效（limit=2 ⇒ 最多 2 条）', listTwo.status === 200 && runBatches(listTwo.body).length <= 2 && runBatches(listTwo.body).length > 0,
+  runBatches(listTwo.body).length)
+ok('列表里的 retryCount 与明细里 failures 条数一致（"要重跑几项"两个口径对得上）',
+  (() => {
+    const hit = listBatches.find((b) => b.batchId === cancelId)
+    return hit === undefined ? false : hit.retryCount === runFailures(afterCancelResume.body).length
+  })(), listBatches.find((b) => b.batchId === cancelId))
+
+// ── 5g. 只读审计：查询路由不写盘（整树 sha256 前后比对）────────────────────────
+console.log('\n5g) 只读审计：打一遍所有只读查询，整个 grok-output 树逐字节不变')
+const idxBeforeRead = existsSync(path.join(RUN_ROOT, 'index.json'))
+const beforeRead = await treeSnapshot(RUN_ROOT)
+const readOnlyHits = []
+readOnlyHits.push(await getJson(runUrl('batch=' + encodeURIComponent(okId))))
+readOnlyHits.push(await getJson(runUrl('batch=' + encodeURIComponent(okId) + '&driver=1')))
+readOnlyHits.push(await getJson(runUrl('batch=' + encodeURIComponent(partId) + '&verify=stat')))
+readOnlyHits.push(await getJson(runUrl('batch=' + encodeURIComponent(oldId))))
+readOnlyHits.push(await getJson(runsUrl('limit=50')))
+readOnlyHits.push(await getJson(planUrl('batch=' + encodeURIComponent(partId))))
+readOnlyHits.push(await getJson(planUrl()))
+readOnlyHits.push(await getJson(runUrl('batch=does-not-exist-zzz')))
+readOnlyHits.push(await getJson(runUrl()))
+const afterRead = await treeSnapshot(RUN_ROOT)
+ok('⑤ 只读查询全部 200/404（没有一条把状态码打成 5xx：查询不许因为读不到东西而炸）',
+  readOnlyHits.every((hit) => hit.status === 200 || hit.status === 404), readOnlyHits.map((h) => h.status))
+ok('⑤ 打完整整一轮只读查询后，整个 grok-output 树逐字节不变（' + beforeRead.length + ' 个文件：相对路径+字节数+sha256）',
+  beforeRead.length > 0 && JSON.stringify(beforeRead) === JSON.stringify(afterRead),
+  { before: beforeRead.length, after: afterRead.length, diff: beforeRead.filter((x, i) => x !== afterRead[i]).slice(0, 3) })
+ok('⑤ 查询没有偷偷新建文件（含 index.json / run.json 都不许被"顺手刷一下"）',
+  beforeRead.length === afterRead.length, { before: beforeRead.length, after: afterRead.length })
+ok('⑤ 索引文件的存在性也没被查询改变（只有写操作才动它）', idxBeforeRead === existsSync(path.join(RUN_ROOT, 'index.json')))
+
+
 // 收尾：先掐断 keep-alive 连接再关服务、清临时区（Windows 上文件句柄没放干净 rm 会 EBUSY）。
-if (typeof server.closeAllConnections === 'function') server.closeAllConnections()
 await new Promise((resolve) => server.close(resolve))
 try {
   await fsp.rm(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })

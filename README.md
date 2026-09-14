@@ -289,6 +289,76 @@ node "<DSH 安装目录>/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --prof
 批次的派发请求里只带**来源文本的材料引用**（材料 ID = `source-<批次ID>`、文件路径、字数），
 正文一个字都不进请求；`plan.json` 同样只记 `sourceFile` / `sourceChars`。
 
+## 统一任务记录（`run.json`）：状态 / 当前步骤 / 失败原因 / 产物位置
+
+一条记录 = **一个批次**。它是 `plan.json` + `ledger.json` + 盘上事实推导出来的**物化视图**，落在该批目录里：
+
+```text
+<mediaRoot>/grok-output/<batchId>/
+├─ plan.json  driver.md  source-<label>.md
+├─ ledger.json      # 追加式账本：盘上真有什么（一批一本，只增不改）
+├─ run.json         # 任务记录：状态/当前步骤/失败原因/产物位置（丢了能重算）
+└─ 01-<slug>.jpg …
+```
+
+**为什么不往 `ledger.json` 上加字段**（三条理由，也写在 `index.js` 同名注释里）：
+① 账本是**追加式**的（每落一张图 push 一条）——为了改状态去重写它，它就不再是账本；
+② 还没落任何图的新批次**根本没有** `ledger.json`，而任务记录从建批次那一刻就该存在；
+③ 记录是**可重算**的，账本与产物一条都不能少 —— 能重算的东西单独放一份，别污染事实记录。
+
+| 字段 | 含义 |
+| --- | --- |
+| `runId` / `batchId` | 一条记录就是一个批次，两者同值 |
+| `status` | `pending` / `running` / `partial` / `succeeded` / `failed` / `cancelled` |
+| `step` | 当前步骤：`plan` 待派发 → `dispatch` 驱动中 → `collect` 收图中 → `verify` 产物校验未过 → `done` / `cancelled` |
+| `counts` | 总项数 / 成功 / 失败 / 未跑（账上多出来的条目另记 `orphans`，不污染这三个数） |
+| `failures` | 逐项失败要点 = **「仅重试失败项」的输入清单**（见下） |
+| `artifacts` | 每个产物的绝对路径、相对路径、字节数、sha256、序号、slug、落盘时间 |
+| `control` | 唯一推导不出来的东西：谁登记了 begin/cancel、何时、为什么（含历史） |
+| `createdAt` / `startedAt` / `updatedAt` | 建立 / 开始 / 最近一次变化（都取自事实，不另编时间） |
+| `warnings` | 解释性说明（例：`plan.json` 读不到、账上有计划外的产物、旧账本条目缺 sha256） |
+
+状态判定顺序**固定**（先满足的先算）：全部项都有可校验产物 → `succeeded`；有取消标记 → `cancelled`；
+有人登记过 `begin` 且未过期（2 小时）→ `running`；有成的也有没成的 → `partial`；一个都没成且有真失败 → `failed`；
+其余 → `pending`。恒等式恒成立：`succeeded + failed + missing === total`。
+
+**步骤是推导出来的，不是会话自述**：`running` / `dispatch` 只在有人显式登记时出现 ——
+宿主看不到那个浏览器会话，也不猜；一个没清掉的 begin 标记过了 2 小时就自动失效（`warnings` 里写明）。
+
+### 查询（只读，不写任何文件）
+
+| 调用 | 行为 |
+| --- | --- |
+| `GET /dvp/grok/run?batch=<id>` | 该批明细。默认 **sha256 档**：逐项重算哈希，能抓出"文件被改过" |
+| `GET /dvp/grok/run?batch=<id>&driver=1` | 另附「仅重试失败项」驱动清单（markdown） |
+| `GET /dvp/grok/run?batch=<id>&verify=stat` | 只做存在性与字节数校验（列表/轮询用，不读图片字节） |
+| `GET /dvp/grok/runs?limit=N` | 最近 N 批（默认 20、上限 50）的状态/步骤/计数/待重跑条数 |
+| `GET /dvp/grok/plan` | 既有路由，另外顺带回同一份 `record`（不用打两次） |
+
+只读的边界是**真的只读**：不建目录、不动 `index.json`、不给旧批次补 `run.json` ——
+断言里对整个 `grok-output` 树做 sha256 前后比对（逐文件相同）。
+记录与清单里**不含 nonce**（那把钥匙只沿"派发"那条线走；清单只告诉你去本批 `plan.json` 里读它）。
+
+诚实说明：**面板 UI 还没接这一节** —— 记录目前只走路由（`curl` / agent / 以后的界面），
+面板上的状态列仍然只读它们各自的那份 `plan.json`。
+
+### 三个能力的实际支持程度
+
+| 能力 | 支持到什么程度 |
+| --- | --- |
+| **续跑** | **支持**。机制是既有的：`POST/PUT /dvp/grok/plan` 带 `batchId`（或 `batch`/`dir`）写回同一目录并换发新 nonce，只补没落的那些项。宿主侧额外做两件事：把这次重发登记成 `begin`（`by=plan-reissue`，状态变 `running`）、并**解掉已有的取消标记**（历史里留一条 `resume`）。 |
+| **仅重试失败项** | **只做到清单输出，不自动重跑**。判据四项之一（也就是 `failures[].reason`）：`never-run` 从未落图、`file-missing` 产物文件已不在盘上、`bytes-mismatch` 字节数不符、`sha256-mismatch` 哈希不符（最后一项只有 sha256 档查得出）。清单给出"重跑哪几项 + 每项为什么 + 落盘命令 + 提示词正文"，并**明确不新建批次**（新建会另起目录，本批永远补不齐）。宿主不驱动浏览器，"照清单重跑"这一下由会话里的 agent 做。 |
+| **取消** | **只记语义，不是真中断**。执行者是会话里的浏览器插件（持用户的 Edge 登录态），宿主看不到那个进程、没有东西可杀 —— 所以 `action:"cancel"` 只写下"谁、何时、为什么"。它**不动产物**（断言里比对字节与 mtime）、也不改计数。误标了用 `action:"clear"` 清掉；取消之后重发 plan 就是续跑。 |
+
+登记状态的唯一写入口（只写该批 `run.json` 的 `control` 段，`plan.json` / `ledger.json` / 产物一个字节都不碰）：
+
+```bash
+curl -X POST http://127.0.0.1:<端口>/dvp/grok/run -H 'Content-Type: application/json' \
+  -d '{"batchId":"2026-09-14_1238-门廊按铃","action":"cancel","by":"面板","reason":"额度用尽，先停"}'
+```
+
+`legacy`（旧版平铺布局的只读别名）**不接受**状态登记 —— 它连 `run.json` 都不写，读它只走 derived 推导。
+
 ## 派发历史（`/dvp/manifest` 的 `runs`）
 
 每次派发写一条历史（时间、路径、条数、过程目录）。面板每次只提交**最新一条**，
@@ -315,8 +385,9 @@ node "<DSH 安装目录>/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --prof
 ## 自检
 
 ```bash
-node tools/selfcheck.mjs        # 237 项：静态契约、纯函数、槽注册、面板渲染、布局分配、技能包、热重扫、本地文件读取、镜像一致性
-node tools/probe-host.mjs       # 118 项：把 apply() 挂到真 node:http 上，打真 /dvp/* 路由（临时 fixture）
+node tools/selfcheck.mjs        # 243 项：静态契约、纯函数、槽注册、面板渲染、布局分配、技能包、热重扫、本地文件读取、镜像一致性
+node tools/probe-host.mjs       # 190 项：把 apply() 挂到真 node:http 上，打真 /dvp/* 路由（临时 fixture）
+node tools/verify-grok-bytes.mjs # 207 项：字节不进会话 + 三道门 + 统一任务记录（状态/续跑/取消/只读）
 node tools/probe-live.mjs       # 24 项：对真实媒体根目录跑扫描/分流/状态/Grok 产物核对（只读）
 node tools/sync-servable.mjs    # 改完 client.js 后同步预览页那一份（不跑就地同步会被 3f 断言拦住）
 ```
@@ -324,6 +395,8 @@ node tools/sync-servable.mjs    # 改完 client.js 后同步预览页那一份�
 `probe-host.mjs` 覆盖：路由注册、扫描分流与 `depth` 语义、路径围栏（越界 403、非图片扩展名拒绝）、
 图片字节（PNG 魔数校验）、文本读取、manifest 写读回、运行目录落盘、Grok 批次与图片保存、静态预览页、
 静态预览的路径穿越防护、`ctx.skills.register` 的真实注册内容（含 frontmatter 块标量解析）。
+`verify-grok-bytes.mjs` 的第 5 节覆盖统一任务记录：一次成功批次的记录与产物齐全、部分缺图 ⇒ `partial` 与失败项清单、
+续跑 / 仅重试失败项的输出、取消语义、**只读查询不写盘**（整树 sha256 前后比对）、旧批次向后兼容。
 两套都全绿才输出 `全部通过：N 项检查`。
 
 ## 已修的坑（都是实测出来的，不是猜的）
