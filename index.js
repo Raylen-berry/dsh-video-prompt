@@ -1452,6 +1452,36 @@ export async function apply(ctx, rawConfig = {}) {
     },
   }))
 
+  // ---- ①b 选目录（v0.4.0：输出/媒体文件夹不再只能手打路径）----
+  // 用宿主自己的目录选择缝 `ctx.directoryPicker`（由 dsh-host-directory-picker-auto 按宿主处境
+  // 挂 native 或 browse 后端）：native 后端 `capability().pick()` 直接弹 OS 对话框并返回绝对路径，
+  // 取消返回 null。**不自己造对话框**（PowerShell/Electron 各写一套既不统一也不可移植）。
+  // 服务没组合（或被卸载）时如实报 unavailable，前端退回"手填路径"，不假装能用。
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/dvp/pick-dir',
+    handler: async (req, res) => {
+      try {
+        const picker = ctx.get('directoryPicker')
+        if (picker === undefined || typeof picker.capability !== 'function') {
+          sendJson(res, 200, { ok: false, error: 'unavailable', message: '这个宿主没有组合目录选择器：请直接手填路径（或装 dsh-host-directory-picker-auto）' })
+          return
+        }
+        const cap = picker.capability()
+        if (cap && cap.kind === 'native') {
+          const dir = await cap.pick()
+          sendJson(res, 200, { ok: true, dir: typeof dir === 'string' ? dir : '', canceled: typeof dir !== 'string' })
+          return
+        }
+        // browse 后端（远程/无头宿主）：能力词汇是"在应用内列举与创建"，不是 OS 对话框。
+        // 本插件前端还没接那套浏览 UI，如实说明，别让用户以为是弹框失败。
+        sendJson(res, 200, { ok: false, error: 'browse-only', message: '这个宿主的目录选择是应用内浏览式：请手填路径' })
+      } catch (err) {
+        sendJson(res, 500, { ok: false, error: String((err && err.message) || err) })
+      }
+    },
+  }))
+
   // ---- ② 读文本（提示词预览）----
   disposers.push(webServer.register({
     kind: 'exact',

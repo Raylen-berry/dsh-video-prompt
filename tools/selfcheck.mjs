@@ -311,12 +311,14 @@ ok('清晰度下拉渲染出来了', panelHtml.includes('清晰度') && panelHtm
 ok('画幅下拉渲染出来了', panelHtml.includes('画幅') && panelHtml.includes('9:16 全竖'))
 ok('张数下拉渲染出来了', panelHtml.includes('每个提示词张数'))
 ok('清晰度档位按低到高渲染', panelHtml.indexOf('720p') < panelHtml.indexOf('1080p') && panelHtml.indexOf('1080p') < panelHtml.indexOf('2K'))
-// 三个生图要求 + 一个层数 + 一个路径 = 5 个 select
-ok('下拉都是 select 元素（原生控件，主题无关）', (panelHtml.match(/<select/g) || []).length === 5, panelHtml.match(/<select/g))
+// 三个生图要求 + 一个层数 = 4 个 select（原来还有一个「路径」下拉，v0.4.0 换成了顶部栏目条）
+ok('下拉都是 select 元素（原生控件，主题无关）', (panelHtml.match(/<select/g) || []).length === 4, panelHtml.match(/<select/g))
 ok('每个选项都渲染成 option', (panelHtml.match(/<option/g) || []).length >= 17, (panelHtml.match(/<option/g) || []).length)
 ok('有扫描层数下拉（默认 4 层）', panelHtml.includes('层数') && panelHtml.includes('只看这一层') && panelHtml.includes('8 层'))
-// 路径二选一（默认落在主线 prompt 上）
-ok('有「路径」下拉且默认是主线', panelHtml.includes('路径') && panelHtml.includes('素材 → 提示词 → 生图') && panelHtml.includes('爆款元素'))
+// v0.4.0：顶部四个栏目取代原「路径」下拉（用户 2026-09-14：像会话区 对话/轨迹/费用 那样分栏）
+ok('顶部栏目条有生图/生文案/生视频/爆款分析四个', ['生图', '生文案', '生视频', '爆款分析'].every((t) => panelHtml.includes(t))
+  && (panelHtml.match(/role="tab"/g) || []).length === 4, (panelHtml.match(/role="tab"/g) || []).length)
+ok('默认停在「生图」栏目（主按钮随之是准备生图请求）', /data-dvp-tab="image"/.test(panelHtml) && panelHtml.includes('准备生图请求'))
 ok('默认态主按钮是「准备生图请求」', panelHtml.includes('准备生图请求') && !panelHtml.includes('准备分析请求'))
 // v0.2.0（用户 2026-09-14 反馈）：主按钮只说它真正做的事 —— 把请求写进输入框、按 Enter 才开跑；
 // 面板底部另有独立的「清空草稿」入口（收起/关闭面板一律保留草稿，不再需要关闭确认框）。
@@ -359,6 +361,23 @@ ok('layoutPanel 里没有 howto 特例分支了（isHowto 判定已删）', !/is
 ok('生图要求 / 来源文本不再因大纲敞开而让位', !/\(howtoOpen \|\| isViral\) \? null/.test(source))
 ok('抽屉带独立关闭入口', /data-dvp-howto-drawer/.test(source) && /onClick: function \(\) \{ setHowtoOpen\(false\) \}/.test(source))
 ok('默认态里素材三列常驻（与大纲入口同屏）', panelHtml.includes('dvp-cols') && panelHtml.includes('看大纲'))
+// v0.4.0：素材行不再显示文件大小（用户 2026-09-14：名称/大小/时间三样里，大小没人看还占宽）
+ok('素材行不再推入文件大小', !/item\.bytes\) dim\.push\(formatBytes/.test(source) && !/dim\.push\(formatBytes/.test(source))
+// v0.4.0：三列各有自己的色条（video/image/text），一眼分得开
+ok('三列带 data-kind 区分', /'data-kind': kind/.test(source) && /\.dvp-col\[data-kind=video\]/.test(source)
+  && /\.dvp-col\[data-kind=image\]/.test(source) && /\.dvp-col\[data-kind=text\]/.test(source))
+// v0.4.0：抽屉必须自己保证**读得清** —— 开壁纸时主题的 --dsw-alias-bg-* 全是半透明玻璃
+// （实测本机 0.05–0.17），只调颜色 alpha 没用，得靠 backdrop 模糊把底下的素材文字糊掉
+ok('抽屉带 backdrop 模糊（玻璃观感 + 读得清）', /\.dvp-drawer\{[^}]*backdrop-filter:blur\(/.test(source)
+  && /\.dvp-drawer\{[^}]*background-image:linear-gradient/.test(source))
+ok('面板本身也带 backdrop 模糊', /\.dvp-panel\{[^}]*backdrop-filter:blur\(/.test(source))
+// v0.4.0：素材区紧跟"挑文件夹"行，生图要求/来源文本排在它下面
+ok('素材区排在挑文件夹行之后、生图要求之前',
+  source.indexOf('isCopy ? renderCopyFields() : renderMaterialBody()') > 0
+  && source.indexOf('isCopy ? renderCopyFields() : renderMaterialBody()') < source.indexOf("'生图要求'"))
+// v0.4.0：输出/媒体文件夹都能用宿主的目录选择器（hsot 路由 /dvp/pick-dir）
+ok('产物目录与媒体文件夹都有「选文件夹…」', (source.match(/pickHostDir\(setRunsRoot\)/g) || []).length === 1
+  && (source.match(/pickHostDir\(setFolder\)/g) || []).length === 1 && source.includes("'/dvp/pick-dir'"))
 
 // 弹框透明度：面板背景必须是实色，且带一层实色 background-image 兜底
 const cssBlock = /var CSS = \[([\s\S]*?)\]\.join\('\\n'\)/.exec(source)
@@ -502,7 +521,7 @@ ok('缺中段时安全返回', layout({ querySelector: () => null }, 572) === un
 ok('layoutPanel 由 flip 内部调用（不需要额外 effect）', /layoutPanel\(panel, room\)/.test(source), '')
 // 回归（用户报"四个文件滚不动"的根因之一）：面板自己的 wrapRef 必须挂在面板根节点上，
 // 否则 flip 的每轮 effect 与 ResizeObserver 全是空跑（"effect 计数在涨、函数却没执行到"）。
-ok('面板根节点挂了 wrapRef', source.includes("h('div', { className: 'dvp-panel', ref: wrapRef }"))
+ok('面板根节点挂了 wrapRef', source.includes("'data-dvp-tab': tab, ref: wrapRef"))
 ok('flip/RO 兼容"传面板本身"与"传外层 wrap"两种锚点', source.includes('function findPanelNode') && source.includes('findPanelNode(wrap)') && source.includes('findPanelNode(node)'))
 sandbox.window = realWindow
 
@@ -741,6 +760,20 @@ console.log('\n— 面板草稿（内存，不写磁盘）—')
   ok('samePath 认同一目录的不同写法', it.samePath('D:\\media\\a\\', 'd:/media/a') === true
     && it.samePath('D:\\media\\a', 'D:\\media\\b') === false
     && it.samePath('', '') === false && it.samePath(null, 'D:/m') === false)
+
+  // ── 生文案栏目（v0.4.0）：请求构建器 + 栏目到宿主状态的映射 ──────────────
+  const copyReq = it.buildCopyRequest(['7143039', 'https://fanqienovel.com/page/710000'], '男频爽文向，前 3 秒钩子要狠', 'D:/runs', 'D:/runs/process/x')
+  ok('生文案请求列出全部书单', copyReq.includes('7143039') && copyReq.includes('fanqienovel.com/page/710000') && copyReq.includes('书单（2 本）'))
+  ok('生文案要求只读免费章节、不许绕过付费', copyReq.includes('只读免费章节') && copyReq.includes('不要尝试任何绕过手段'))
+  ok('生文案把用户提示词原样带进去', copyReq.includes('男频爽文向，前 3 秒钩子要狠'))
+  ok('生文案指了 book-material-copy 技能并留了兜底', copyReq.includes('book-material-copy') && copyReq.includes('没注册就按上面的口径'))
+  ok('生文案写明产出与过程目录', copyReq.includes('过程目录') && copyReq.includes('D:/runs/process/x') && copyReq.includes('适用投放位'))
+  ok('提示词留空时不写"文案要求"段（技能默认口径兜底）',
+    !it.buildCopyRequest(['1'], '', '', '').includes('文案要求（用户给的提示词'))
+  ok('栏目 ⇒ 宿主状态：生图/生视频=prompt，爆款分析=viral，生文案=不写（null）',
+    it.tabToPipelineMode('image') === 'prompt' && it.tabToPipelineMode('video') === 'prompt'
+    && it.tabToPipelineMode('viral') === 'viral' && it.tabToPipelineMode('copy') === null)
+  ok('四个栏目 id 齐全', it.PANEL_TABS.map((x) => x.id).join(',') === 'image,copy,video,viral')
   // 重扫不该把用户改过的勾选冲成"全勾"：草稿里记过的按草稿，新冒出来的按默认勾上
   const merged = it.mergeSelection(['D:/m/a.png', 'D:/m/b.png', 'D:/m/new.png'], { 'D:/m/a.png': false, 'D:/m/b.png': true })
   ok('重扫后：用户取消过的仍未勾选', merged['D:/m/a.png'] === false)

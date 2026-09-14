@@ -150,8 +150,8 @@ const host = await import(pathToFileURL(path.join(PKG, 'index.js')).href)
 
 console.log('\n1) apply() 挂在真 HTTP 服务上')
 await host.apply(fakeCtx, { mediaRoot: MEDIA, runsRoot: RUNS, registerSkills: true })
-ok('注册了 15 条路由', routes.length === 15, routes.map((r) => r.kind + ' ' + r.path))
-for (const expected of ['/dvp/scan', '/dvp/file', '/dvp/image', '/dvp/probe', '/dvp/state', '/dvp/manifest', '/dvp/run', '/dvp/process', '/dvp/source', '/dvp/grok/plan', '/dvp/grok/save', '/dvp/grok/run', '/dvp/grok/runs', '/dvp/skills/reload']) {
+ok('注册了 16 条路由', routes.length === 16, routes.map((r) => r.kind + ' ' + r.path))
+for (const expected of ['/dvp/scan', '/dvp/pick-dir', '/dvp/file', '/dvp/image', '/dvp/probe', '/dvp/state', '/dvp/manifest', '/dvp/run', '/dvp/process', '/dvp/source', '/dvp/grok/plan', '/dvp/grok/save', '/dvp/grok/run', '/dvp/grok/runs', '/dvp/skills/reload']) {
   ok('路由存在 ' + expected, routes.some((r) => r.path === expected), routes.map((r) => r.path))
 }
 
