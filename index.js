@@ -34,7 +34,7 @@
 // 越界直接 403。面板本地挑选的目录（File System Access API）只在浏览器侧读，不进宿主。
 // ============================================================================
 
-import { createReadStream, existsSync, promises as fsp } from 'node:fs'
+import { createReadStream, existsSync, promises as fsp, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
@@ -199,6 +199,100 @@ function slugify(raw, fallback) {
   return cleaned === '' ? fallback : cleaned
 }
 
+// ── Grok 批次的目录身份 ─────────────────────────────────────────────────────
+// 批次的"目录名"就是 batchId；它必须是单个路径段（不含分隔符、不是 . / ..），
+// 这样 `path.join(grokRoot, batchId)` 天然越不出 grok-output。
+// LEGACY_BATCH_ID 是旧版平铺布局的别名：读得到，但不许再往里写新批次。
+
+const LEGACY_BATCH_ID = 'legacy'
+
+/** 把调用方给的批次身份收成合法目录名；不合法返回 ''（调用方按 400 拒掉，不静默改名）。 */
+function normalizeGrokBatchId(raw) {
+  if (typeof raw !== 'string') return ''
+  const trimmed = raw.trim()
+  if (trimmed === '' || trimmed.length > 96) return ''
+  if (trimmed === '.' || trimmed === '..') return ''
+  if (/[\\/]/.test(trimmed) || trimmed.includes(':')) return ''
+  if ((trimmed.split('').map((ch) => ch.charCodeAt(0))).some((code) => code < 32)) return ''
+  return trimmed
+}
+
+/** 在 grok-output 下占一个没人用的批次目录（撞名加 -2/-3…）。返回 { batchId, dir }。 */
+function resolveUniqueGrokBatch(root, slug) {
+  const base = localStampMinute() + '-' + slug
+  let batchId = base
+  let n = 2
+  while (existsSync(path.join(root, batchId)) && n < 100) {
+    batchId = base + '-' + n
+    n += 1
+  }
+  return { batchId, dir: path.join(root, batchId) }
+}
+
+// ── Grok 请求体里的"批次身份" ────────────────────────────────────────────────
+// batchId / batch / dir 三个键都收（dir 是旧调用方的口径，取末段目录名）。
+// 四种结论分得很开，宁可口径严一点也不许猜：
+//   ''      + ok  → 调用方没指定批次 ⇒ 新建
+//   非空     + ok  → 续做/重试这一批 ⇒ 写回同一目录
+//   非空     + !ok → 给了批次身份但非法 ⇒ 400（不许静默改成新建，否则调用方会以为重试成功了）
+//   ROOT    + ok  → 旧版面板把平铺的 grok-output 目录当 dir 传上来 ⇒ 等同没指定（新建子目录）
+
+const BATCH_ROOT = Symbol('grok-output-root')
+
+/** index.json 只是加速用的轻量索引：缺失/损坏/不合法一律当没有，绝不因此报错。 */
+async function readGrokIndex(root) {
+  try {
+    const parsed = JSON.parse(await fsp.readFile(path.join(root, 'index.json'), 'utf8'))
+    if (parsed === null || typeof parsed !== 'object') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+/** 扫 grok-output 下的批次目录（含旧版平铺布局，它算一个历史批次）。目录名即批次 ID。 */
+function scanGrokBatches(root) {
+  const out = []
+  try {
+    if (existsSync(path.join(root, 'plan.json'))) out.push({ batchId: LEGACY_BATCH_ID, legacy: true, mtime: mtimeOf(path.join(root, 'plan.json')) })
+  } catch { /* 读不到就当没有 */ }
+  let entries = []
+  try {
+    entries = readdirSync(root, { withFileTypes: true })
+  } catch {
+    return out
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const planFile = path.join(root, entry.name, 'plan.json')
+    if (!existsSync(planFile)) continue
+    out.push({ batchId: entry.name, legacy: false, mtime: mtimeOf(planFile) })
+  }
+  return out
+}
+
+function mtimeOf(file) {
+  try {
+    return statSync(file).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
+/** 写/更新 index.json。这是缓存，失败不影响批次本身，所以整段吞掉。 */
+async function touchGrokIndex(root, batchId) {
+  try {
+    const previous = await readGrokIndex(root)
+    const batches = Array.isArray(previous && previous.batches) ? previous.batches : []
+    const next = [{ batchId, at: new Date().toISOString() }, ...batches.filter((item) => !item || item.batchId !== batchId)]
+    await fsp.writeFile(path.join(root, 'index.json'), JSON.stringify({
+      updatedAt: new Date().toISOString(),
+      latest: batchId,
+      batches: next.slice(0, 200),
+    }, null, 2), 'utf8')
+  } catch { /* 索引只是加速件 */ }
+}
+
 // ── Grok 驱动清单（写给人看，也写给会话里的 agent 看）────────────────────────
 
 function driverDoc(plan) {
@@ -206,6 +300,7 @@ function driverDoc(plan) {
   lines.push('# Grok 出图驱动清单')
   lines.push('')
   lines.push('- 生成时间：' + plan.createdAt)
+  if (plan.batchId) lines.push('- 批次 ID：' + plan.batchId + '（重试这一批时把它回传给 /dvp/grok/plan，写回同一目录）')
   lines.push('- 目标站点：' + plan.grokUrl)
   lines.push('- 批次条数：' + plan.count)
   lines.push('- 图片落地：' + plan.dir)
@@ -237,7 +332,8 @@ function driverDoc(plan) {
   if (plan.sourceFile) {
     lines.push('   提示词要对着来源文本里的具体情节写：先读 ' + plan.sourceFile + '，再动笔。')
   }
-  lines.push('4. 每拿到一张图，调 `POST /dvp/grok/save`（base64 或图片 URL + index/slug）落盘。')
+  lines.push('4. 每拿到一张图，调 `POST /dvp/grok/save`（base64 或图片 URL + index/slug'
+    + (plan.batchId ? ' + batchId="' + plan.batchId + '"（同一批的图必须进同一目录）' : '') + '）落盘。')
   lines.push('5. 全部投完检查 ' + path.join(plan.dir, 'ledger.json') + ' 对账。')
   lines.push('')
   lines.push('## 提示词清单')
@@ -906,73 +1002,171 @@ export async function apply(ctx, rawConfig = {}) {
   // ---- ⑨ Grok 出图：批次落盘 / 读回 / 图片字节保存 ----
   // 浏览器驱动那一步由会话里的浏览器插件做（它持用户的 Edge 登录态）；
   // 宿主这边只负责把提示词批次记下来、把抓到的图落到工作区。
-  const grokDir = () => path.join(mediaRoot, 'grok-output')
+  //
+  // **每批一个目录**：<mediaRoot>/grok-output/<batchId>/，batchId = 年-月-日_时分-<slug>
+  // （同一分钟重复派发自动加 -2/-3，与 /dvp/run、/dvp/process 同一套写法）。
+  // 早先 plan.json / driver.md / source-*.md / 成图都直接落在 grok-output 根下，
+  // 于是"新批次覆盖旧批次"、"同名 slug 的图互相盖"，而 ledger.json 是**追加**的
+  // （见下方 save 路由），账上留着两条批次记录、盘上只剩最后一批 —— 账本与产物对不上。
+  const grokRoot = () => path.join(mediaRoot, 'grok-output')
+
+  /** 解析请求体里的批次身份（口径见 BATCH_ROOT 上的注释）。 */
+  function wantBatch(body) {
+    const raw = typeof body.batchId === 'string' && body.batchId.trim() !== '' ? body.batchId
+      : typeof body.batch === 'string' && body.batch.trim() !== '' ? body.batch
+        : typeof body.dir === 'string' && body.dir.trim() !== '' ? path.basename(body.dir.trim()) : ''
+    if (raw === '') return { ok: true, id: '' }
+    const normalized = normalizeGrokBatchId(raw)
+    if (normalized === '') return { ok: false, id: '' }
+    if (normalized.toLowerCase() === LEGACY_BATCH_ID) return { ok: false, id: '', legacyAlias: true }
+    // 名字恰好等于 grok-output 的目录：是个真批次目录就照常当批次用，否则认定为"旧调用方把平铺目录当 dir 传上来了"
+    const rootName = path.basename(grokRoot())
+    if (normalized === rootName && !existsSync(path.join(grokRoot(), normalized, 'plan.json'))) return { ok: true, id: BATCH_ROOT }
+    return { ok: true, id: normalized }
+  }
+
+  /** 批次的响应形状：批次身份 + 目录 + 文件路径。dir/plan 字段名沿用旧版，调用方不用改。 */
+  const grokBatchInfo = (root, batchId, dir) => ({
+    batchId,
+    legacy: dir === root,
+    dir,
+    planFile: path.join(dir, 'plan.json'),
+    driverFile: path.join(dir, 'driver.md'),
+    ledgerFile: path.join(dir, 'ledger.json'),
+    root,
+  })
+
+  /** 不传参时的"最新一批"：可信索引 → 目录 mtime。索引缺失/陈旧都不影响结论。 */
+  async function resolveLatestGrokBatch(root, index) {
+    const scanned = scanGrokBatches(root)
+    if (scanned.length === 0) return null
+    const byId = new Map(scanned.map((item) => [item.batchId, item]))
+    if (index && Object.keys(index).length > 0 && typeof index.latest === 'string' && byId.has(index.latest)) {
+      return byId.get(index.latest)
+    }
+    return scanned.reduce((best, item) => (item.mtime > best.mtime ? item : best), scanned[0])
+  }
+
+  /** 落盘一批：新建（不传批次身份）或续做（传了 batchId/dir）。返回 { error } 表示调用方要拒掉。 */
+  async function writeGrokBatch(req, res) {
+    const body = JSON.parse(await readBody(req, 8 * 1024 * 1024))
+    const entries = Array.isArray(body.entries) ? body.entries : []
+    if (entries.length === 0) {
+      sendJson(res, 400, { ok: false, error: 'entries 为空' })
+      return undefined
+    }
+    const root = grokRoot()
+    const wanted = wantBatch(body)
+    if (!wanted.ok) {
+      sendJson(res, 400, {
+        ok: false,
+        error: wanted.legacyAlias === true
+          ? 'legacy 是旧版平铺布局的只读别名，不能写入；请不传 batchId 新建批次'
+          : 'batchId 非法：只能是单个目录名（不含 / \\ : 与 ..）',
+      })
+      return undefined
+    }
+    let batchId = wanted.id === BATCH_ROOT ? '' : wanted.id
+    let dir = ''
+    if (batchId !== '') {
+      // 续做/重试：写回调用方指定的那一批，不新建、不改名。
+      dir = path.join(root, batchId)
+    } else {
+      // 调用方没指定批次（或只给了平铺目录）：新建一个独立批次目录。
+      const fresh = resolveUniqueGrokBatch(root, slugify(body.slug || (body.source && body.source.file) || 'grok', 'grok'))
+      batchId = fresh.batchId
+      dir = fresh.dir
+    }
+    // 传进来的批次身份经 normalize 后只剩单个路径段，这里再兜一道 403（与其它路由同一口径）。
+    if (!allowAny(dir)) {
+      sendJson(res, 403, { ok: false, error: '批次目录越界' })
+      return undefined
+    }
+    await fsp.mkdir(dir, { recursive: true })
+    // 来源文本（小说正文/章纲）跟着批次落盘：几万字不进对话上下文，agent 按路径去读。
+    let sourceFile = ''
+    let sourceChars = 0
+    const sourceText = body.source && typeof body.source.text === 'string' ? body.source.text.trim() : ''
+    if (sourceText !== '') {
+      if (Buffer.byteLength(sourceText, 'utf8') > MAX_SOURCE_BYTES) {
+        sendJson(res, 413, { ok: false, error: '来源文本过大（上限 ' + Math.round(MAX_SOURCE_BYTES / 1024 / 1024) + ' MB）' })
+        return undefined
+      }
+      const label = slugify(body.source && body.source.file ? body.source.file : 'novel', 'novel')
+      sourceFile = path.join(dir, `source-${label}.md`)
+      await fsp.writeFile(sourceFile, sourceText, 'utf8')
+      sourceChars = sourceText.length
+    }
+    const options = sanitizeGrokOptions(body.options)
+    const plan = {
+      createdAt: new Date().toISOString(),
+      batchId,
+      grokUrl: typeof body.grokUrl === 'string' && body.grokUrl !== '' ? body.grokUrl : 'https://grok.com/',
+      dir,
+      count: entries.length,
+      ...(typeof body.processDir === 'string' && body.processDir !== '' ? { processDir: body.processDir.slice(0, 300) } : {}),
+      ...(options === undefined ? {} : { options }),
+      ...(sourceFile === '' ? {} : { sourceFile, sourceChars }),
+      entries: entries.map((entry, index) => ({
+        index: Number(entry.index) || index + 1,
+        title: String(entry.title || '').slice(0, 120),
+        prompt: String(entry.prompt || ''),
+        slug: String(entry.slug || 'prompt').slice(0, 48),
+        source: String(entry.source || ''),
+        chars: String(entry.prompt || '').length,
+      })),
+    }
+    await fsp.writeFile(path.join(dir, 'plan.json'), JSON.stringify(plan, null, 2), 'utf8')
+    await fsp.writeFile(path.join(dir, 'driver.md'), driverDoc(plan), 'utf8')
+    await touchGrokIndex(root, batchId)
+    sendJson(res, 200, {
+      ok: true,
+      ...grokBatchInfo(root, batchId, dir),
+      count: plan.count,
+      ...(options === undefined ? {} : { options }),
+      ...(sourceFile === '' ? {} : { sourceFile, sourceChars }),
+    })
+    return undefined
+  }
 
   disposers.push(webServer.register({
     kind: 'exact',
     path: '/dvp/grok/plan',
     handler: async (req, res) => {
       try {
-        const dir = grokDir()
+        const root = grokRoot()
         if (req.method === 'GET') {
-          if (!existsSync(path.join(dir, 'plan.json'))) {
-            sendJson(res, 200, { ok: true, plan: null, dir })
+          const requested = normalizeGrokBatchId(query(req.url, 'batch'))
+          if (query(req.url, 'batch') !== '' && requested === '') {
+            sendJson(res, 400, { ok: false, error: 'batch 非法（只能是单个目录名）' })
             return
           }
-          sendJson(res, 200, { ok: true, dir, plan: JSON.parse(await fsp.readFile(path.join(dir, 'plan.json'), 'utf8')) })
+          const index = await readGrokIndex(root)
+          let picked
+          if (requested !== '') {
+            picked = requested.toLowerCase() === LEGACY_BATCH_ID
+              ? (existsSync(path.join(root, 'plan.json')) ? { batchId: LEGACY_BATCH_ID, legacy: true, mtime: mtimeOf(path.join(root, 'plan.json')) } : null)
+              : scanGrokBatches(root).find((item) => item.batchId === requested) || null
+          } else {
+            picked = await resolveLatestGrokBatch(root, index)
+          }
+          if (picked === null || picked === undefined) {
+            sendJson(res, 200, { ok: true, plan: null, dir: root, batchId: '', batches: [] })
+            return
+          }
+          const info = grokBatchInfo(root, picked.batchId, picked.legacy ? root : path.join(root, picked.batchId))
+          const planFile = path.join(info.dir, 'plan.json')
+          if (!existsSync(planFile)) {
+            sendJson(res, 200, { ok: true, plan: null, ...info, batches: [] })
+            return
+          }
+          const plan = JSON.parse(await fsp.readFile(planFile, 'utf8'))
+          const batches = scanGrokBatches(root).sort((a, b) => b.mtime - a.mtime).map((item) => item.batchId)
+          sendJson(res, 200, { ok: true, ...info, plan, batches })
           return
         }
         if (req.method === 'POST' || req.method === 'PUT') {
-          const body = JSON.parse(await readBody(req, 8 * 1024 * 1024))
-          const entries = Array.isArray(body.entries) ? body.entries : []
-          if (entries.length === 0) {
-            sendJson(res, 400, { ok: false, error: 'entries 为空' })
-            return
-          }
-          await fsp.mkdir(dir, { recursive: true })
-          // 来源文本（小说正文/章纲）跟着批次落盘：几万字不进对话上下文，agent 按路径去读。
-          let sourceFile = ''
-          let sourceChars = 0
-          const sourceText = body.source && typeof body.source.text === 'string' ? body.source.text.trim() : ''
-          if (sourceText !== '') {
-            if (Buffer.byteLength(sourceText, 'utf8') > MAX_SOURCE_BYTES) {
-              sendJson(res, 413, { ok: false, error: '来源文本过大（上限 ' + Math.round(MAX_SOURCE_BYTES / 1024 / 1024) + ' MB）' })
-              return
-            }
-            const label = slugify(body.source && body.source.file ? body.source.file : 'novel', 'novel')
-            sourceFile = path.join(dir, `source-${label}.md`)
-            await fsp.writeFile(sourceFile, sourceText, 'utf8')
-            sourceChars = sourceText.length
-          }
-          const options = sanitizeGrokOptions(body.options)
-          const plan = {
-            createdAt: new Date().toISOString(),
-            grokUrl: typeof body.grokUrl === 'string' && body.grokUrl !== '' ? body.grokUrl : 'https://grok.com/',
-            dir,
-            count: entries.length,
-            ...(typeof body.processDir === 'string' && body.processDir !== '' ? { processDir: body.processDir.slice(0, 300) } : {}),
-            ...(options === undefined ? {} : { options }),
-            ...(sourceFile === '' ? {} : { sourceFile, sourceChars }),
-            entries: entries.map((entry, index) => ({
-              index: Number(entry.index) || index + 1,
-              title: String(entry.title || '').slice(0, 120),
-              prompt: String(entry.prompt || ''),
-              slug: String(entry.slug || 'prompt').slice(0, 48),
-              source: String(entry.source || ''),
-              chars: String(entry.prompt || '').length,
-            })),
-          }
-          await fsp.writeFile(path.join(dir, 'plan.json'), JSON.stringify(plan, null, 2), 'utf8')
-          await fsp.writeFile(path.join(dir, 'driver.md'), driverDoc(plan), 'utf8')
-          sendJson(res, 200, {
-            ok: true,
-            dir,
-            count: plan.count,
-            planFile: path.join(dir, 'plan.json'),
-            driverFile: path.join(dir, 'driver.md'),
-            ...(options === undefined ? {} : { options }),
-            ...(sourceFile === '' ? {} : { sourceFile, sourceChars }),
-          })
+          await writeGrokBatch(req, res)
           return
         }
         sendJson(res, 405, { ok: false, error: '方法不允许' })
@@ -992,7 +1186,45 @@ export async function apply(ctx, rawConfig = {}) {
           return
         }
         const body = JSON.parse(await readBody(req, 48 * 1024 * 1024))
-        const dir = grokDir()
+        const root = grokRoot()
+        // 图的去处必须跟着批次走：传了 batchId 就进那一批；没传就进最新一批（没有批次才新建），
+        // 绝不退回 grok-output 根目录 —— 那正是"新批次盖掉旧批次图"的老毛病。
+        const wanted = wantBatch(body)
+        if (!wanted.ok) {
+          sendJson(res, 400, {
+            ok: false,
+            error: wanted.legacyAlias === true
+              ? 'legacy 是旧版平铺布局的只读别名，不能写入；请传具体 batchId'
+              : 'batchId 非法：只能是单个目录名（不含 / \\ : 与 ..）',
+          })
+          return
+        }
+        let batchId = wanted.id === BATCH_ROOT ? '' : wanted.id
+        let dir = ''
+        if (batchId !== '') {
+          dir = path.join(root, batchId)
+          // 存图是"往已有批次里放结果"：批次得先存在。批次 ID 写错时宁可 404，
+          // 也不要凭空建一个只有图片、没有 plan.json 的孤儿目录。
+          if (!existsSync(dir)) {
+            sendJson(res, 404, { ok: false, error: '批次不存在：' + batchId + '（先用 /dvp/grok/plan 建批次）' })
+            return
+          }
+        } else {
+          const latest = await resolveLatestGrokBatch(root, await readGrokIndex(root))
+          if (latest !== null && !latest.legacy) {
+            batchId = latest.batchId
+            dir = path.join(root, batchId)
+          } else {
+            // 没有批次就现建一个（保持"直接调 save 也能用"的老行为），但落进自己的子目录。
+            const fresh = resolveUniqueGrokBatch(root, 'grok')
+            batchId = fresh.batchId
+            dir = fresh.dir
+          }
+        }
+        if (!allowAny(dir)) {
+          sendJson(res, 403, { ok: false, error: '批次目录越界' })
+          return
+        }
         await fsp.mkdir(dir, { recursive: true })
         const index = Number(body.index) || 1
         const slug = String(body.slug || 'prompt').replace(/[^A-Za-z0-9._\u4e00-\u9fa5-]+/g, '-').slice(0, 48) || 'prompt'
@@ -1024,6 +1256,8 @@ export async function apply(ctx, rawConfig = {}) {
         }
         const file = path.join(dir, String(index).padStart(2, '0') + '-' + slug + ext)
         await fsp.writeFile(file, bytes)
+        // 账本就写在批次目录里：一批一本账，条目里的 file 绝对路径直接指回本批产物，
+        // 账本与产物不可能再分家（旧版账本在 grok-output 根下跨批次累加，才对不上）。
         const ledgerFile = path.join(dir, 'ledger.json')
         let ledger = { items: [], updatedAt: '' }
         try {
@@ -1031,6 +1265,8 @@ export async function apply(ctx, rawConfig = {}) {
         } catch {
           ledger = { items: [], updatedAt: '' }
         }
+        ledger.batchId = batchId
+        ledger.dir = dir
         ledger.items.push({
           at: new Date().toISOString(),
           index,
@@ -1042,7 +1278,8 @@ export async function apply(ctx, rawConfig = {}) {
         })
         ledger.updatedAt = new Date().toISOString()
         await fsp.writeFile(ledgerFile, JSON.stringify(ledger, null, 2), 'utf8')
-        sendJson(res, 200, { ok: true, file, bytes: bytes.length, dir, ledger: ledgerFile })
+        await touchGrokIndex(root, batchId)
+        sendJson(res, 200, { ok: true, batchId, file, bytes: bytes.length, dir, ledger: ledgerFile })
       } catch (err) {
         sendJson(res, 500, { ok: false, error: String((err && err.message) || err) })
       }

@@ -155,6 +155,54 @@ for (const expected of ['/dvp/scan', '/dvp/file', '/dvp/image', '/dvp/probe', '/
   ok('路由存在 ' + expected, routes.some((r) => r.path === expected), routes.map((r) => r.path))
 }
 
+// 另起一个独立宿主实例（自己的 state.json / mediaRoot），用来验"盘上只有旧布局"这类
+// 换一个 mediaRoot 才说得清的场景。同一个 index.js 模块被 apply 两次是安全的：
+// 根目录在 apply 时按 state/config 解析一次，两次互不影响。
+const extraServers = []
+async function startExtraHost(mediaDir, runsDir) {
+  const stateBackup = process.env.DSH_HOME
+  const previous = await fsp.readFile(path.join(TMP, 'dsh-video-prompt', 'state.json'), 'utf8').catch(() => '{}')
+  process.env.DSH_HOME = TMP
+  await fsp.writeFile(path.join(TMP, 'dsh-video-prompt', 'state.json'), JSON.stringify({ mediaRoot: mediaDir, runsRoot: runsDir }), 'utf8')
+  const extraRoutes = []
+  const extraCtx = {
+    get(key) {
+      if (key === 'webServer') {
+        return {
+          register(route) {
+            extraRoutes.push(route)
+            return () => {}
+          },
+          tapIndex() {
+            return () => {}
+          },
+        }
+      }
+      return undefined
+    },
+    effect(fn) {
+      return typeof fn === 'function' ? fn() : undefined
+    },
+  }
+  const extraServer = createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1')
+    const route = extraRoutes.find((r) => (r.kind === 'exact' ? r.path === url.pathname : url.pathname.startsWith(r.path)))
+    if (route === undefined) {
+      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false, error: '无路由匹配' }))
+      return
+    }
+    await route.handler(req, res)
+  })
+  await host.apply(extraCtx, { mediaRoot: mediaDir, runsRoot: runsDir, registerSkills: false })
+  await new Promise((resolve) => extraServer.listen(0, '127.0.0.1', resolve))
+  // 复原走宿主自己的 state.json 通道，避免污染主链路
+  await fsp.writeFile(path.join(TMP, 'dsh-video-prompt', 'state.json'), previous, 'utf8')
+  process.env.DSH_HOME = stateBackup
+  extraServers.push(extraServer)
+  return extraServer.address().port
+}
+
 // ── 3. 扫描 ─────────────────────────────────────────────────────────────────
 console.log('\n2) /dvp/scan · 图片视频分流')
 const scan = await (await fetch(BASE + '/dvp/scan?path=' + encodeURIComponent(MEDIA))).json()
@@ -337,11 +385,152 @@ const save1 = await (await fetch(BASE + '/dvp/grok/save', {
 ok('base64 图片保存成功', save1.ok === true && save1.bytes === PNG_1x1.length, save1)
 ok('文件名按序号+slug 命名', save1.ok && path.basename(save1.file) === '01-men-lang.png', save1.file)
 ok('落盘字节正确', save1.ok && (await fsp.readFile(save1.file)).equals(PNG_1x1))
-const ledger = JSON.parse(await fsp.readFile(path.join(MEDIA, 'grok-output', 'ledger.json'), 'utf8'))
+ok('图片落进批次目录（不是 grok-output 根下）', save1.ok && path.dirname(save1.file) === plan.dir, { file: save1.file, planDir: plan.dir })
+ok('save 回带 batchId，与批次一致', save1.batchId === plan.batchId, { save: save1.batchId, plan: plan.batchId })
+const ledger = JSON.parse(await fsp.readFile(path.join(plan.dir, 'ledger.json'), 'utf8'))
 ok('ledger 记账 1 条', ledger.items.length === 1 && ledger.items[0].slug === 'men-lang', ledger.items)
 
 const getPlan = await (await fetch(BASE + '/dvp/grok/plan')).json()
 ok('批次可读回', getPlan.plan && getPlan.plan.count === 2, getPlan.plan && getPlan.plan.count)
+
+// ── 8c. Grok 批次隔离（P1：不同批次曾经共用一个目录，plan.json/成图互相覆盖）────
+// 旧写法把 plan.json / driver.md / source-*.md / <序号>-<slug>.<ext> 全写进 grok-output 根下，
+// 新批次直接盖掉上一批，而 ledger.json 是**追加**的 —— 账本上两条批次、盘上只剩最后一批。
+console.log('\n8c) /dvp/grok/* · 每批一个目录（不互相覆盖）')
+
+const batchBody = (title, sourceText) => ({  grokUrl: 'https://grok.com/',
+  // 故意同名 slug：旧布局下两批会写进同一个 plan.json / 同一个目录
+  slug: 'same-name',
+  entries: [{ index: 1, title, slug: 'same-slug', prompt: '提示词 ' + title }],
+  source: { text: sourceText, file: 'same-source.txt' },
+})
+const post = (body) => fetch(BASE + '/dvp/grok/plan', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+}).then((r) => r.json())
+const put = (body) => fetch(BASE + '/dvp/grok/plan', {
+  method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+}).then((r) => r.json())
+
+// ① 两个同名批次先后写入 ⇒ 各自 plan.json 独立、互不覆盖
+const batchA = await post(batchBody('第一批', '第一批正文'))
+const batchB = await post(batchBody('第二批', '第二批正文'))
+ok('① 同名批次分到两个目录', batchA.ok && batchB.ok && batchA.dir !== batchB.dir, { a: batchA.dir, b: batchB.dir })
+ok('① batchId 带本地时间戳 + slug', /^\d{4}-\d{2}-\d{2}_\d{4}-same-name(-\d+)?$/.test(batchA.batchId || ''), batchA.batchId)
+ok('① 两个批次目录都真的建好了', existsSync(batchA.dir) && existsSync(batchB.dir))
+ok('① 两个批次都在 grok-output 的子目录里', batchA.dir.startsWith(path.join(MEDIA, 'grok-output') + path.sep) && batchB.dir.startsWith(path.join(MEDIA, 'grok-output') + path.sep))
+const planA = JSON.parse(await fsp.readFile(path.join(batchA.dir, 'plan.json'), 'utf8'))
+const planB = JSON.parse(await fsp.readFile(path.join(batchB.dir, 'plan.json'), 'utf8'))
+ok('① 各自 plan.json 内容正确（互不覆盖）', planA.entries[0].title === '第一批' && planB.entries[0].title === '第二批', [planA.entries[0].title, planB.entries[0].title])
+ok('① plan.json 里记着自己的 batchId', planA.batchId === batchA.batchId && planB.batchId === batchB.batchId)
+ok('① 同名来源文件各自独立（不互相盖）', planA.sourceFile === path.join(batchA.dir, 'source-same-source.md') && planB.sourceFile === path.join(batchB.dir, 'source-same-source.md')
+  && (await fsp.readFile(planA.sourceFile, 'utf8')) === '第一批正文' && (await fsp.readFile(planB.sourceFile, 'utf8')) === '第二批正文')
+ok('① driver.md 也在各自目录里', existsSync(path.join(batchA.dir, 'driver.md')) && existsSync(path.join(batchB.dir, 'driver.md')))
+ok('① 老位置不再被写（grok-output 根下没有 plan.json）', !existsSync(path.join(MEDIA, 'grok-output', 'plan.json')))
+// 同名 slug 的图：两批各存一张，互不覆盖（第 ① 条的"下游图片"半边）
+const imgBytesA = Buffer.from('AAAA-first-batch', 'utf8')
+const imgBytesB = Buffer.from('BBBB-second-batch', 'utf8')
+const saveA = await (await fetch(BASE + '/dvp/grok/save', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ batchId: batchA.batchId, index: 1, slug: 'same-slug', ext: '.png', base64: 'data:image/png;base64,' + imgBytesA.toString('base64') }),
+})).json()
+const saveB = await (await fetch(BASE + '/dvp/grok/save', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ batchId: batchB.batchId, index: 1, slug: 'same-slug', ext: '.png', base64: 'data:image/png;base64,' + imgBytesB.toString('base64') }),
+})).json()
+ok('① 同名 slug 的图分别落在各自批次目录', saveA.ok && saveB.ok && saveA.file !== saveB.file
+  && path.dirname(saveA.file) === batchA.dir && path.dirname(saveB.file) === batchB.dir, { a: saveA.file, b: saveB.file })
+ok('① 两张图字节各自正确（没被覆盖）', (await fsp.readFile(saveA.file)).equals(imgBytesA) && (await fsp.readFile(saveB.file)).equals(imgBytesB))
+const ledgerA = JSON.parse(await fsp.readFile(path.join(batchA.dir, 'ledger.json'), 'utf8'))
+const ledgerB = JSON.parse(await fsp.readFile(path.join(batchB.dir, 'ledger.json'), 'utf8'))
+ok('① 账本按批分开，且条目都指向本批产物', ledgerA.items.length === 1 && ledgerB.items.length === 1
+  && ledgerA.items[0].file === saveA.file && ledgerB.items[0].file === saveB.file
+  && ledgerA.batchId === batchA.batchId && ledgerB.batchId === batchB.batchId)
+
+// ② 传 batchId 重试 ⇒ 写回同一目录，不新建
+const dirsBefore = (await fsp.readdir(path.join(MEDIA, 'grok-output'), { withFileTypes: true })).filter((e) => e.isDirectory()).length
+const retryA = await put({ ...batchBody('第一批重试', '第一批正文v2'), batchId: batchA.batchId })
+const dirsAfter = (await fsp.readdir(path.join(MEDIA, 'grok-output'), { withFileTypes: true })).filter((e) => e.isDirectory()).length
+ok('② 重试写回同一目录', retryA.ok === true && retryA.dir === batchA.dir && retryA.batchId === batchA.batchId, { before: batchA.dir, after: retryA.dir })
+ok('② 没有新建目录', dirsAfter === dirsBefore, { before: dirsBefore, after: dirsAfter })
+ok('② 重试后的 plan.json 是新的（原地更新）', JSON.parse(await fsp.readFile(path.join(batchA.dir, 'plan.json'), 'utf8')).entries[0].title === '第一批重试')
+ok('② 重试没碰另一批', JSON.parse(await fsp.readFile(path.join(batchB.dir, 'plan.json'), 'utf8')).entries[0].title === '第二批')
+ok('② 传 dir（旧调用方口径）也认得出批次', (await put({ ...batchBody('按dir重试', 'x'), dir: batchB.dir })).dir === batchB.dir)
+
+// ③ 最新一批：在②之后新建（最新 = 最后写的那一批，不依赖同一秒内的 mtime 赛跑）
+const batchC = await post(batchBody('第三批', '第三批正文'))
+ok('③ 新建批次拿到新目录', batchC.ok === true && batchC.dir !== batchA.dir && batchC.dir !== batchB.dir)
+const latest = await (await fetch(BASE + '/dvp/grok/plan')).json()
+ok('③ 不传参拿到最新批次', latest.plan !== null && latest.batchId === batchC.batchId, { got: latest.batchId, want: batchC.batchId })
+ok('③ 响应保留 dir / plan 字段名', typeof latest.dir === 'string' && latest.plan !== null && latest.plan.batchId === latest.batchId)
+ok('③ 最新批次的 plan 是第三批（不是被覆盖的旧批）', latest.plan.entries[0].title === '第三批', latest.plan.entries[0].title)
+const picked = await (await fetch(BASE + '/dvp/grok/plan?batch=' + encodeURIComponent(batchB.batchId))).json()
+ok('③ ?batch= 读到指定批次（正是那一批的内容）', picked.batchId === batchB.batchId && picked.plan.entries[0].title === '按dir重试', { got: picked.batchId, title: picked.plan && picked.plan.entries[0].title })
+const pickedA = await (await fetch(BASE + '/dvp/grok/plan?batch=' + encodeURIComponent(batchA.batchId))).json()
+ok('③ ?batch= 读得到被重试过的那批（重试后的内容）', pickedA.batchId === batchA.batchId && pickedA.plan.entries[0].title === '第一批重试', pickedA.plan && pickedA.plan.entries[0].title)
+ok('③ 响应带批次清单便于对齐账本', Array.isArray(latest.batches) && [batchA, batchB, batchC].every((b) => latest.batches.includes(b.batchId)), latest.batches)
+
+// ④ 旧布局兼容：预先放在 grok-output 根下的 plan.json 仍读得到（算一个历史批次）
+// 把它的 mtime 显式压到一年前：这样"最新一批"的判定不会被"测试刚好刚写了这个文件"干扰，
+// 也能真的验到"索引缺失时回退 mtime"这条路径（旧布局天然比新批次旧，不该被当成最新）。
+const legacyRoot = path.join(MEDIA, 'grok-output')
+const legacyPlan = { createdAt: '2026-09-10T00:00:00.000Z', dir: legacyRoot, count: 1, entries: [{ index: 1, title: '旧批次', slug: 'old', prompt: '旧提示词' }] }
+await fsp.writeFile(path.join(legacyRoot, 'plan.json'), JSON.stringify(legacyPlan, null, 2), 'utf8')
+const longAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000)
+await fsp.utimes(path.join(legacyRoot, 'plan.json'), longAgo, longAgo)
+const legacyRead = await (await fetch(BASE + '/dvp/grok/plan?batch=legacy')).json()
+ok('④ 混合布局下 ?batch=legacy 读得到旧布局', legacyRead.plan !== null && legacyRead.plan.entries[0].title === '旧批次', legacyRead)
+ok('④ 旧布局标为 legacy，dir 仍是原来那个目录', legacyRead.legacy === true && legacyRead.dir === legacyRoot, { legacy: legacyRead.legacy, dir: legacyRead.dir })
+const legacyWrite = await fetch(BASE + '/dvp/grok/plan', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...batchBody('x', 'y'), batchId: 'legacy' }),
+})
+ok('④ legacy 别名拒绝写入（400）', legacyWrite.status === 400, legacyWrite.status)
+// 更干净的一条链路：盘上**只有**旧布局（没有任何批次子目录）时，不传参的 GET 必须还能读到它
+const LEGACY_MEDIA = path.join(TMP, 'media-legacy')
+const LEGACY_RUNS = path.join(TMP, 'runs-legacy')
+await fsp.mkdir(path.join(LEGACY_MEDIA, 'grok-output'), { recursive: true })
+await fsp.mkdir(LEGACY_RUNS, { recursive: true })
+await fsp.writeFile(path.join(LEGACY_MEDIA, 'grok-output', 'plan.json'), JSON.stringify({ ...legacyPlan, dir: path.join(LEGACY_MEDIA, 'grok-output') }, null, 2), 'utf8')
+const legacyPort = await startExtraHost(LEGACY_MEDIA, LEGACY_RUNS)
+const legacyBase = 'http://127.0.0.1:' + legacyPort
+const onlyLegacy = await (await fetch(legacyBase + '/dvp/grok/plan')).json()
+ok('④ 只有旧布局时，不传参仍读到 plan（老数据不丢）', onlyLegacy.plan !== null && onlyLegacy.plan.entries[0].title === '旧批次', onlyLegacy)
+ok('④ 它被标成 legacy 且 dir 指向原位置', onlyLegacy.legacy === true && onlyLegacy.dir === path.join(LEGACY_MEDIA, 'grok-output'))
+const legacyNew = await (await fetch(legacyBase + '/dvp/grok/plan', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(batchBody('新批次不写老位置', 'x')),
+})).json()
+ok('④ 新批次写进子目录，不覆盖旧布局', legacyNew.ok === true && legacyNew.dir !== path.join(LEGACY_MEDIA, 'grok-output')
+  && legacyNew.dir.startsWith(path.join(LEGACY_MEDIA, 'grok-output') + path.sep))
+ok('④ 旧布局 plan.json 内容没被动过', JSON.parse(await fsp.readFile(path.join(LEGACY_MEDIA, 'grok-output', 'plan.json'), 'utf8')).entries[0].title === '旧批次')
+const legacyStill = await (await fetch(legacyBase + '/dvp/grok/plan?batch=legacy')).json()
+ok('④ 写完新批次后旧布局仍读得到（?batch=legacy）', legacyStill.plan !== null && legacyStill.plan.entries[0].title === '旧批次')
+
+// ⑤ 路径越界仍被拒（沿用既有 allowAny 口径）
+for (const bad of ['../evil', '..\\evil', 'a/b', '/etc/passwd', 'C:\\Windows\\Temp', '..']) {
+  const response = await fetch(BASE + '/dvp/grok/plan', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...batchBody('x', 'y'), batchId: bad }),
+  })
+  ok('⑤ 越界 batchId 被拒：' + bad, response.status === 400, response.status)
+}
+const badGet = await fetch(BASE + '/dvp/grok/plan?batch=' + encodeURIComponent('../evil'))
+ok('⑤ GET 越界 batch 被拒 400', badGet.status === 400, badGet.status)
+const badSave = await fetch(BASE + '/dvp/grok/save', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ batchId: '../evil', index: 1, slug: 'x', base64: 'data:image/png;base64,' + PNG_1x1.toString('base64') }),
+})
+ok('⑤ save 越界 batchId 被拒 400', badSave.status === 400, badSave.status)
+ok('⑤ 越界没有在 grok-output 之外留下任何东西', !existsSync(path.join(TMP, 'evil')) && !existsSync(path.join(MEDIA, 'evil')))
+
+// 索引：轻量、可缺失、可损坏，坏了不影响读批次（fetch 不传参仍要拿得到最新一批）
+const indexFile = path.join(MEDIA, 'grok-output', 'index.json')
+ok('索引写出了最新批次', existsSync(indexFile) && JSON.parse(await fsp.readFile(indexFile, 'utf8')).latest === batchC.batchId)
+await fsp.writeFile(indexFile, '{ 坏掉的 json', 'utf8')
+const afterBroken = await (await fetch(BASE + '/dvp/grok/plan')).json()
+ok('索引损坏后仍能读回最新批次', afterBroken.plan !== null && afterBroken.batchId === batchC.batchId, afterBroken.batchId)
+await fsp.rm(indexFile, { force: true })
+const afterMissing = await (await fetch(BASE + '/dvp/grok/plan')).json()
+ok('索引缺失后仍能读回最新批次（回退到目录 mtime）', afterMissing.plan !== null && afterMissing.batchId !== '', afterMissing.batchId)
+const newAfterIndexLoss = await post({ ...batchBody('索引丢失后新建', 'z') })
+ok('索引缺失时新建批次照常', newAfterIndexLoss.ok === true && existsSync(path.join(newAfterIndexLoss.dir, 'plan.json')))
 
 // ── 9. 状态读写 ─────────────────────────────────────────────────────────────
 console.log('\n9) /dvp/state · 配置与技能清单')
@@ -433,6 +622,7 @@ ok('重扫确实重新走了一遍注册（假服务计数 ×2）', skillRegistr
 
 // ── 收尾 ────────────────────────────────────────────────────────────────────
 server.close()
+for (const extra of extraServers) extra.close()
 await fsp.rm(TMP, { recursive: true, force: true })
 
 console.log('\n' + (failures === 0 ? '全部通过：' + checks + ' 项检查' : failures + ' / ' + checks + ' 项失败'))

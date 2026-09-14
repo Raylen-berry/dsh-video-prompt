@@ -79,7 +79,7 @@
    或点「按路径加」按 `;` / 换行分隔贴多个绝对路径（宿主白名单内，读 `GET /dvp/file`）；
    多个文件会带 `===== 文件名 =====` 分隔标题并进同一个正文框；
 3. 勾上「按来源文本生图」；
-4. 点「用 Grok 生图」——正文会随批次落到 `<mediaRoot>/grok-output/source-<label>.md`，
+4. 点「用 Grok 生图」——正文会随批次落到 `<mediaRoot>/grok-output/<批次ID>/source-<label>.md`，
    驱动请求里只带**路径**，不把几万字塞进对话框；agent 先读它，再按主要情节写提示词。
 
 「落盘为文件」按钮可以单独把正文写到 `<runsRoot>/source/<label>.md`（`POST /dvp/source`）。
@@ -197,9 +197,46 @@ node "<DSH 安装目录>/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --prof
 4. 勾选要处理的项（支持整组全选/取消）→ 点主按钮。面板会先建过程目录（`process\年-月-日_时分-素材名\`），
    请求写进输入框（Enter 之前你还能改）；写入失败会自动改为复制到剪贴板。
 5. 按 Enter 发送，agent 逐项产出，过程产物进过程目录、成品进产物目录。
-6. 主线 + 只勾图片时，`用 Grok 生图` 可用：它先建批次（`plan.json` + `driver.md`，含过程目录行），
+6. 主线 + 只勾图片时，`用 Grok 生图` 可用：它先建**一个批次目录**
+   `<mediaRoot>/grok-output/<批次ID>/`（批次 ID = `年-月-日_时分-<素材名>`，同一分钟重复派发自动加 `-2`），
+   `plan.json` + `driver.md` + 来源文本 + 成图 + `ledger.json` 全在这一个目录里；
    再把驱动请求写进输入框，由会话里的 agent 用浏览器插件驱动你的 Edge 打开 grok.com 出图，
-   每张图经 `/dvp/grok/save` 落盘到 `<mediaRoot>/grok-output/`，最后用 `ledger.json` 对账。
+   每张图经 `/dvp/grok/save` 落盘（带 `batchId` 就进那一批，不带就进最新一批），最后用**本批的** `ledger.json` 对账。
+   想重试某一批：把它的 `batchId` 回传给 `/dvp/grok/plan`（PUT/POST），写回同一目录，不新建。
+   读回也一样：`GET /dvp/grok/plan` 不给参数 = 最新一批，`?batch=<批次ID>` = 指定批次。
+
+## Grok 批次目录（P1 数据覆盖修复）
+
+**旧行为（已修）**：`plan.json` / `driver.md` / `source-*.md` / 成图全写在固定的
+`<mediaRoot>/grok-output/` 平面里 —— 新批次盖掉旧批次，同名 slug 的图互相盖，
+而 `ledger.json` 是追加的，于是**账本上两条批次记录、盘上只剩最后一批**。
+
+**现在**：一批一个目录，目录名就是批次 ID（`年-月-日_时分-<素材名>`，同分钟重复派发加 `-2`）：
+
+```text
+<mediaRoot>/grok-output/
+├─ index.json                          # 可选加速件：latest + 批次清单；缺失/损坏都能读批次
+├─ 2026-09-14_1238-门廊按铃/            # 一个批次 = 一个目录
+│  ├─ plan.json  driver.md
+│  ├─ source-<label>.md                # 本批的来源文本（几万字不进对话）
+│  ├─ 01-<slug>.jpg  …                 # 本批成图（文件名规则不变）
+│  └─ ledger.json                      # 本批的账，items[].file 都指回本批产物
+└─ 2026-09-14_1240-荧光药剂/            # 另一批，互不影响
+```
+
+接口约定：
+
+| 调用 | 行为 |
+| --- | --- |
+| `POST/PUT /dvp/grok/plan`（不传批次身份） | 新建批次目录，响应回 `batchId` |
+| `POST/PUT /dvp/grok/plan` + `batchId`（或 `batch`/`dir`） | 续做/重试这一批，写回同一目录 |
+| `GET /dvp/grok/plan` | 最新一批（`dir`/`plan` 字段名不变，另带 `batchId`/`batches`） |
+| `GET /dvp/grok/plan?batch=<id>` | 指定批次；`?batch=legacy` = 旧版平铺布局 |
+| `POST /dvp/grok/save` + `batchId` | 图落进那一批；不传则进最新一批 |
+| 旧布局 `<mediaRoot>/grok-output/plan.json` | 仍读得到（算一个历史批次），但**不再被写入** |
+
+拿不准批次时：`GET /dvp/grok/plan` 看 `batchId` 与 `batches`，拿 `batchId` 去和 `ledger.json` 对齐。
+`batchId` 只接受单个目录名（不含 `/` `\` `:` 与 `..`），非法一律 400。
 
 ## 边界与诚实说明
 
@@ -321,6 +358,16 @@ node tools/sync-servable.mjs    # 改完 client.js 后同步预览页那一份�
     活宿主实测：分发的 bundle 里有 `pickFiles`/`readTextFile` 且无 FSA 调用，
     并在真内核里用 `input[type=file]` + `File.text()` 把一段 md 内容读回来了。
     「按路径加」（宿主 `GET /dvp/file`，白名单内）本来就是好的，仍是确定可用的那条路。
+18. **Grok 批次共用一个目录，新批次覆盖旧批次**（审计定 P1）：`grok-output` 是固定目录，
+    `plan.json` / `driver.md` / `source-*.md` / 成图全写在同一个平面里 —— 新批次的 `plan.json`
+    直接盖掉上一批，同名 slug 的图互相盖；而 `ledger.json` 是**追加**的，于是盘上只剩最后一批、
+    账上却留着两条批次记录，`ledger.items[].file` 指向已被覆盖的文件（**账本与产物对不上**）。
+    同文件的 `/dvp/process`、`/dvp/run` 早就在用"一跑一个唯一目录"，这条线没跟上。
+    现在每批一个目录 `<mediaRoot>/grok-output/<批次ID>/`（`batchId = 年-月-日_时分-<素材名>`，
+    同分钟重复派发加 `-2`），该批的 `plan.json`/`driver.md`/`source-*.md`/成图/**本批 ledger.json**
+    同处一目录；传 `batchId` 即续做/重试（写回原目录），GET 不传参读最新一批、`?batch=<id>` 读指定批次，
+    旧平铺 `grok-output/plan.json` 仍读得到（`?batch=legacy`）且不再被写入。
+    `probe-host.mjs` 新增 8c 段 45 条断言覆盖这些路径（批次隔离/重试/最新与指定/旧布局兼容/越界拒绝/索引容错）。
 
 ## Grok 出图的实测硬约束（2026-09-11 在真实页面验证）
 
@@ -339,6 +386,7 @@ node tools/sync-servable.mjs    # 改完 client.js 后同步预览页那一份�
 （`Stop model response` 消失 / 出现 `Download`·`Make video` 工具条）再去读，
 否则会拿到空壳。`tools/grok-shot.mjs` 的 `grokRecipe()` 已按这个结论写死步骤。
 `/dvp/grok/save` 同时支持 base64 与 URL，但**URL 那条路对 Grok 不可用**（403），留着是给别的图源。
+存图时**带上批次 ID**（`POST /dvp/grok/save` 的 `batchId`），图才会进它所属的那一批目录。
 
 **取图的三条通道，按推荐顺序**：
 
@@ -350,4 +398,7 @@ node tools/sync-servable.mjs    # 改完 client.js 后同步预览页那一份�
 
 ② 是 2026-09-11 实测走通的那条：Grok 成图显示过之后，按 259316 字节在 Edge 缓存里命中
 `f_001527`，取出后 sha256 与页面内读到的一致，`read_image` 正常解码成 784×1168。
-首张成图已落盘为 `media/grok-output/01-01-门廊按铃.jpg`（259316 字节）并写入 `ledger.json`。
+首张成图落盘为 `media/grok-output/01-01-门廊按铃.jpg`（259316 字节）并写入 `ledger.json` ——
+这是**旧版平铺布局**的路径；新版一律落 `<mediaRoot>/grok-output/<批次ID>/`，
+旧平铺目录仍读得到（`GET /dvp/grok/plan` 不传参在没有任何批次时返回它，`?batch=legacy` 显式读），
+但不会再往里写新批次。详情见下方「Grok 批次目录（P1 数据覆盖修复）」。

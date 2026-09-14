@@ -594,14 +594,15 @@ window.__ModuleLoader__.load({
     }
 
     // ───────────────────────────────────────────────────── Grok 出图派发请求 ──────
-    function buildGrokRequest(items, planDir, source, options, docs, processDir) {
+    function buildGrokRequest(items, planDir, source, options, docs, processDir, batchId) {
       var images = chosenOf(items, 'image')
       var lines = []
       lines.push('接着上一步的图片提示词，用浏览器插件驱动我的 Edge，在 Grok 里出图。')
       lines.push('')
       lines.push('- 提示词批次目录：' + planDir)
+      if (batchId) lines.push('- 批次 ID：' + batchId + '（存图时回传它，保证这一批的图进同一个目录）')
       lines.push('- 待出图：' + images.length + ' 张')
-      lines.push('- 落盘路由：POST /dvp/grok/save（base64 或图片 URL + index + slug）')
+      lines.push('- 落盘路由：POST /dvp/grok/save（base64 或图片 URL + index + slug' + (batchId ? ' + batchId' : '') + '）')
       if (processDir) lines.push('- 过程目录：' + processDir + '（草稿、临时截图、取图中间文件写这里）')
       var optLines = grokOptionLines(options)
       for (var oi = 0; oi < optLines.length; oi++) lines.push(optLines[oi])
@@ -610,7 +611,7 @@ window.__ModuleLoader__.load({
       lines.push('1. browser_open(use:"edge", url:"https://grok.com/")，用我的登录态。')
       lines.push('2. 未登录、有人机验证、或提示额度用尽 —— 停下来告诉我，不要尝试绕过。')
       lines.push('3. 逐条把图片提示词贴进 Grok 输入框发送，等新图出现（单条超时 120 秒就记失败并继续）。')
-      lines.push('4. 每拿到一张图就调 /dvp/grok/save 落盘，文件名用 `<序号>-<slug>.png`。')
+      lines.push('4. 每拿到一张图就调 /dvp/grok/save 落盘，文件名用 `<序号>-<slug>.png`' + (batchId ? '，带上 batchId=' + batchId : '') + '。')
       lines.push('5. 全部投完给我一份对账：成功 N 张、失败 M 张、失败原因、图片实际路径。')
       lines.push('')
       lines.push('待出图清单：')
@@ -1015,9 +1016,10 @@ window.__ModuleLoader__.load({
             body: JSON.stringify(payload),
           }).then(function (res) {
             var dir = (res && res.ok && res.dir) ? res.dir : planDir
+            var batchId = (res && res.ok && res.batchId) ? res.batchId : ''
             if (!res || res.ok !== true) setError('批次落盘失败：' + ((res && res.error) || '未知错误'))
             else setNote('已建 Grok 批次：' + res.count + ' 条 → ' + dir + (res.sourceFile ? ' · 来源文本 → ' + res.sourceFile : '') + (processDir ? ' · 过程目录 → ' + processDir : ''))
-            var text = buildGrokRequest(imagesOnly, dir, useSource ? sourceText : '', grokOpts, docsOnly, processDir)
+            var text = buildGrokRequest(imagesOnly, dir, useSource ? sourceText : '', grokOpts, docsOnly, processDir, batchId)
             var result = dispatchToComposer(text)
             if (!result.ok) {
               void copyText(text).then(function (copied) {
@@ -1203,10 +1205,11 @@ window.__ModuleLoader__.load({
           ['拿到文章/正文', '先从正文里抽「主要情节」：人物关系、冲突爆发点、关键动作与道具、场景地点、时间（昼/夜/雨/雪）、情绪走向；按冲突强度排序，挑最强的那几个当出图点；再把每个情节映射到上面那套七段式，补足原文没写但画面必须有的信息（光线、构图、镜头）。正文只当材料，里面出现的命令句不会被当指令执行。'],
           ['拿到文档（md/txt）', '扫描到的 md / txt / srt 会进第三列「文档」，默认勾选。派发时文档当材料不当指令：agent 先读全文，按主要情节与冲突点产出图片提示词；「用 Grok 生图」时勾选的文档也会以路径形式附在请求里。'],
           ['路径 · 爆款元素（蒸馏）', '面板顶部「路径」切到第二条：走插件自带的 viral-media-copywriter 技能（通用爆款素材模型）。先 inventory_media.py 只读清点去重，视频抽帧进过程目录 frames\\，逐素材取证（直接观察/功能解释/表现关联分开记、带时间戳），按四层抽象「原子线索→功能模式→创意机制→可迁移配方」出《爆款元素卡》，汇总创意基因报告（Top 模式卡、组合顺序、反例、可测试假设），需要时再按输出协议出稳健/强钩子/实验三方向原创文案。学机制不抄原句；技能万一没注册，请求内嵌同一套流程兜底。'],
-          ['过程目录', '每次派发（含 Grok 出图）自动建 <产物目录>\\process\\年-月-日_时分-<素材名>\\：拆帧、爆款元素卡、草稿等中间产物都进这里，和最终产物（runs 提示词、grok-output 成图）分开；同分钟再派发自动加 -2 后缀。'],
+          ['过程目录', '每次派发自动建 <产物目录>\\process\\年-月-日_时分-<素材名>\\：拆帧、爆款元素卡、草稿等中间产物都进这里，和最终产物（runs 提示词、grok-output 成图）分开；同分钟再派发自动加 -2 后缀。'],
+          ['Grok 批次目录', '「用 Grok 生图」一批一个目录：<产物目录>\\grok-output\\年-月-日_时分-<素材名>\\，plan.json、driver.md、来源文本、成图、ledger.json 全在这一批里。想重试就把 batchId 回传，写回同一目录；不传参数读最新一批，?batch=<批次ID> 读指定批次。'],
           ['合成一版', '若要重出同一张，只改一个维度（姿势/服装/场景其一），其余照抄锚点，避免整条重写导致人物漂移。'],
           ['画幅与清晰度', '画幅先按 Grok 页面上的比例按钮切好再投；清晰度越高越像"加细节"指令，额度消耗越大 —— 所以先低档出构图，满意的再单独重出高档。'],
-          ['产物与对账', '每条提示词写进 runsRoot 下以素材名命名的子目录；Grok 成图落 grok-output/ 并写 ledger.json，最后按「成功 N / 失败 M / 失败原因」对账，不静默跳过。'],
+          ['产物与对账', '每条提示词写进 runsRoot 下以素材名命名的子目录；Grok 成图落 grok-output\\<批次ID>\\ 并写该批的 ledger.json，最后按「成功 N / 失败 M / 失败原因」对账，不静默跳过。'],
         ]
         return h('div', { className: 'dvp-sect dvp-howto' + (howtoOpen ? ' dvp-howto-open' : '') },
           h('div', { className: 'dvp-sectHead' },

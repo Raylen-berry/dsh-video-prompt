@@ -2,6 +2,10 @@
 //
 //   node tools/watch-downloads.mjs [--minutes 15] [--out <dir>] [--src <dir>]
 //
+// `--out` 要指向**本批次的目录**（`<mediaRoot>/grok-output/<批次ID>/`）：
+// 批次目录隔离之后，账本写在该批次目录里，图和账就不会再跨批次混。缺省仍是
+// `$DVP_MEDIA_ROOT/grok-output`（旧版平铺布局），只适合手工收一批图时用。
+//
 // 为什么需要它：Grok 的成图 URL 带签名、绑浏览器会话（node 直连 403、页面内 canvas 被
 // CORS 污染），自动化附加模式下点 Download 又不落盘。于是"最后一公里"由人在真实浏览器里
 // 点一次 Download 完成，本地这一侧用本脚本接住——人点一下，剩下的自动。
@@ -9,7 +13,8 @@
 // 行为：
 //   * 只收 .jpg/.jpeg/.png/.webp，且大小超过 --min-bytes（默认 20KB，滤掉图标与占位）
 //   * 按 mtime 判断"新文件"：只处理启动之后落地、且已稳定的文件（连续两次大小一致才算写完）
-//   * 按 plan.json 的序号顺序命名成 `<序号>-<slug>.<ext>`，写进 grok-output/ledger.json
+//   * 按 plan.json 的序号顺序命名成 `<序号>-<slug>.<ext>`，写进 <out>/ledger.json
+//     （out 指批次目录时，账本与本批产物同处一个目录）
 //   * 已处理过的（同名或同 sha256）跳过，可重复运行
 //   * 到点自己退出，不留常驻进程
 //
