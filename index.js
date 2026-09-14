@@ -137,6 +137,10 @@ async function readState() {
 async function writeState(patch) {
   const current = await readState()
   const next = { ...current, ...(patch && typeof patch === 'object' ? patch : {}) }
+  // 明确清空（null）= 把键删掉，state.json 里不留 `"mediaRoot": null`
+  // —— 留着 null 会在下次启动时被 `persisted.mediaRoot || config…` 当成"没配"，
+  // 看着一样，但 JSON 里的脏值会让人以为配过。
+  for (const key of Object.keys(next)) if (next[key] === null) delete next[key]
   await fsp.mkdir(stateDir(), { recursive: true })
   await fsp.writeFile(stateFile(), JSON.stringify(next, null, 2), 'utf8')
   return next
@@ -357,6 +361,63 @@ function driverDoc(plan) {
 function within(root, target) {
   const rel = path.relative(root, target)
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
+/**
+ * 解析本次运行实际生效的媒体/产物根，并**同步刷新**运行期配置。
+ *
+ * 两个边界必须一起成立，否则会出现"保存了新目录、后续还是写旧目录"：
+ *   ① 语义上：`undefined` = 调用方没提交这个字段（保留现值）；`null` = 明确清空（回默认）。
+ *      —— 只用 `typeof x === 'string'` 判断的话，面板只提交一个 `{ pipelineMode }` 时
+ *      媒体/产物目录会被 `undefined` 覆盖掉，state.json 里两个根一起消失。
+ *   ② 运行期：`apply()` 里各个路由用的是 `runtime.mediaRoot` / `runtime.runsRoot`（对象读），
+ *      不是启动时锁死的常量 —— 否则 `/dvp/state` 保存新目录后，写盘的那些路由仍打旧目录。
+ */
+function resolveRuntime(config, patch, current) {
+  const base = current || {}
+  patch = patch && typeof patch === 'object' ? patch : {}
+  // 注意 `if (patch.mediaRoot === null) next.mediaRoot = …` 这种写法是错的：
+  // 当前值优先会让"明确清空"被忽略（null 判了也没用）。用 `in` 判"提交了没有"：
+  //   提交了（含 null）→ 用提交值（null = 回落到 config 默认）；
+  //   没提交 → 保留当前值（current）→ 再退 config。
+  return {
+    mediaRoot: 'mediaRoot' in patch
+      ? resolveRoot(patch.mediaRoot, path.resolve(config.mediaRoot))
+      : (base.mediaRoot || path.resolve(config.mediaRoot)),
+    runsRoot: 'runsRoot' in patch
+      ? resolveRoot(patch.runsRoot, path.resolve(config.runsRoot))
+      : (base.runsRoot || path.resolve(config.runsRoot)),
+  }
+}
+
+/**
+ * 追加一条派发历史并按任务 ID 去重，保留最近 RUN_HISTORY_LIMIT 条。
+ *
+ * 面板每次只提交**最新一条**（body.runs 长度为 1），所以宿主必须做"追加"，
+ * 直接 `body.runs` 覆盖会把已有历史挤没 —— 界面上就是"派发过几次，历史里只剩最后一次"。
+ * 去重口径：优先用 run.id；没有 id 的旧记录退到 `at|kind|processDir` 指纹
+ * （同一次派发的重复提交会撞在同一个指纹上，不同批次不会）。
+ */
+const RUN_HISTORY_LIMIT = 30
+
+function runKey(run) {
+  if (typeof run.id === 'string' && run.id !== '') return 'id:' + run.id
+  return 'fp:' + [String(run.at || ''), String(run.kind || ''), String(run.processDir || '')].join('|')
+}
+
+function mergeRunHistory(existing, incoming, limit = RUN_HISTORY_LIMIT) {
+  const out = []
+  const seen = new Set()
+  const push = (run) => {
+    if (run === null || typeof run !== 'object' || Array.isArray(run)) return
+    const key = runKey(run)
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push(run)
+  }
+  for (const run of Array.isArray(existing) ? existing : []) push(run)
+  for (const run of Array.isArray(incoming) ? incoming : []) push(run)
+  return out.length > limit ? out.slice(out.length - limit) : out
 }
 
 // ── 扫描 ────────────────────────────────────────────────────────────────────
@@ -648,12 +709,22 @@ const MIME = {
 
 // ── 主入口 ──────────────────────────────────────────────────────────────────
 
+// 离线断言用的纯函数出口（tools/probe-host.mjs、tools/verify-*.mjs 直接 import 这两个，
+// 不必起 HTTP 服务就能验"只提交一个字段不覆盖别的字段"与"历史追加去重"）。
+export { resolveRuntime, mergeRunHistory, RUN_HISTORY_LIMIT }
+
 export async function apply(ctx, rawConfig = {}) {
   const config = normalizeConfig(rawConfig)
   const persisted = await readState()
-  const mediaRoot = path.resolve(persisted.mediaRoot || config.mediaRoot)
-  const runsRoot = path.resolve(persisted.runsRoot || config.runsRoot)
-  const allowedRoots = [mediaRoot, runsRoot, path.resolve(process.cwd())]
+  // 运行期生效的根：**可变对象**，/dvp/state 保存后同步刷新（见 resolveRuntime 注释）
+  const runtime = resolveRuntime(config, {
+    // 盘上存过的根优先；没存过的键不放进 patch，交给 config 兜底
+    ...('mediaRoot' in persisted ? { mediaRoot: persisted.mediaRoot } : {}),
+    ...('runsRoot' in persisted ? { runsRoot: persisted.runsRoot } : {}),
+  })
+  const mediaRoot = () => runtime.mediaRoot
+  const runsRoot = () => runtime.runsRoot
+  const allowedRoots = [runtime.mediaRoot, runtime.runsRoot, path.resolve(process.cwd())]
 
   const webServer = ctx.get('webServer')
   if (webServer === undefined) {
@@ -670,7 +741,7 @@ export async function apply(ctx, rawConfig = {}) {
     path: '/dvp/scan',
     handler: async (req, res) => {
       try {
-        const raw = query(req.url, 'path') || mediaRoot
+        const raw = query(req.url, 'path') || mediaRoot()
         const depthParam = query(req.url, 'depth')
         // 默认 4 层：素材常按「一部剧/一本书一个子目录」摆，默认 2 层会只扫到一半
         // （用户看到的现象就是"图明明在盘里，面板里没有"）。上限 8 层防呆。
@@ -789,7 +860,7 @@ export async function apply(ctx, rawConfig = {}) {
           sendJson(res, 200, {
             ok: true,
             state,
-            defaults: { mediaRoot, runsRoot },
+            defaults: { mediaRoot: mediaRoot(), runsRoot: runsRoot() },
             skills: (await currentSkills()).map((s) => s.name),
           })
           return
@@ -798,15 +869,31 @@ export async function apply(ctx, rawConfig = {}) {
           const patch = JSON.parse(await readBody(req))
           const grokOptions = sanitizeGrokOptions(patch.grokOptions)
           const pipelineMode = sanitizePipelineMode(patch.pipelineMode)
-          const next = await writeState({
-            mediaRoot: typeof patch.mediaRoot === 'string' ? resolveRoot(patch.mediaRoot, path.join(stateDir(), 'media')) : undefined,
-            runsRoot: typeof patch.runsRoot === 'string' ? resolveRoot(patch.runsRoot, path.join(stateDir(), 'runs')) : undefined,
-            ...(grokOptions === undefined ? {} : { grokOptions }),
-            ...(pipelineMode === undefined ? {} : { pipelineMode }),
+          // 只提交了哪个字段就只改哪个：没提交（undefined）保留现值，null 才是明确清空。
+          // 早先写成 `typeof patch.mediaRoot === 'string' ? … : undefined`，于是面板只提交
+          // `{ pipelineMode }` 时两个根被 undefined 覆盖 —— state.json 里的媒体/产物目录直接消失。
+          const statePatch = {}
+          if ('mediaRoot' in patch) statePatch.mediaRoot = patch.mediaRoot === null || patch.mediaRoot === '' ? null : resolveRoot(patch.mediaRoot, path.join(stateDir(), 'media'))
+          if ('runsRoot' in patch) statePatch.runsRoot = patch.runsRoot === null || patch.runsRoot === '' ? null : resolveRoot(patch.runsRoot, path.join(stateDir(), 'runs'))
+          if (grokOptions !== undefined) statePatch.grokOptions = grokOptions
+          if (pipelineMode !== undefined) statePatch.pipelineMode = pipelineMode
+          const next = await writeState(statePatch)
+          // 保存成功就同步刷新运行期配置：后面写盘的每个路由都打新目录
+          // （不再"保存了新目录、还写旧目录"）。`statePatch` 里带 null 的键 = 明确清空，
+          // resolveRuntime 会把它落回 config 默认目录。
+          const effective = resolveRuntime(config, statePatch, runtime)
+          runtime.mediaRoot = effective.mediaRoot
+          runtime.runsRoot = effective.runsRoot
+          for (const root of [effective.mediaRoot, effective.runsRoot]) {
+            if (!allowedRoots.includes(root)) allowedRoots.push(root)
+          }
+          sendJson(res, 200, {
+            ok: true,
+            state: next,
+            // 当前**实际生效**的路径（展开过 ~ / $DSH_HOME 的绝对路径），面板据此显示与回报
+            effective: { mediaRoot: runtime.mediaRoot, runsRoot: runtime.runsRoot },
+            defaults: { mediaRoot: runtime.mediaRoot, runsRoot: runtime.runsRoot },
           })
-          if (next.mediaRoot && !allowedRoots.includes(next.mediaRoot)) allowedRoots.push(next.mediaRoot)
-          if (next.runsRoot && !allowedRoots.includes(next.runsRoot)) allowedRoots.push(next.runsRoot)
-          sendJson(res, 200, { ok: true, state: next })
           return
         }
         sendJson(res, 405, { ok: false, error: '方法不允许' })
@@ -840,8 +927,12 @@ export async function apply(ctx, rawConfig = {}) {
           }
           const merged = await readManifest(dir)
           const items = { ...merged.items, ...(body.items && typeof body.items === 'object' ? body.items : {}) }
-          const runs = Array.isArray(body.runs) ? body.runs.slice(-100) : merged.runs
-          sendJson(res, 200, { ok: true, ...(await writeManifest(dir, { items, runs, updatedAt: new Date().toISOString() })) })
+          // 历史按任务 ID **追加去重**，保留最近 RUN_HISTORY_LIMIT 条。
+          // 面板每次只提交最新一条，直接拿 body.runs 覆盖会把之前的历史挤没
+          // （界面上的现象就是"派发过几次，历史里只剩最后一次"）。
+          const runs = mergeRunHistory(merged.runs, body.runs)
+          const written = await writeManifest(dir, { items, runs, updatedAt: new Date().toISOString() })
+          sendJson(res, 200, { ok: true, ...written, runCount: runs.length })
           return
         }
         sendJson(res, 405, { ok: false, error: '方法不允许' })
@@ -865,7 +956,7 @@ export async function apply(ctx, rawConfig = {}) {
         const slug = String(body.slug || 'run').replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60) || 'run'
         // 目录名用本地时间、精确到分钟（2026-09-11_1705-slug），与 /dvp/process 同一套命名；
         // 同一分钟内的第二次派发自动追加 -2。
-        const runDir = resolveUniqueDir(runsRoot, localStampMinute() + '-' + slug)
+        const runDir = resolveUniqueDir(runsRoot(), localStampMinute() + '-' + slug)
         if (!allowAny(runDir)) {
           sendJson(res, 403, { ok: false, error: '运行目录越界' })
           return
@@ -950,7 +1041,7 @@ export async function apply(ctx, rawConfig = {}) {
           sendJson(res, 413, { ok: false, error: '来源文本过大（上限 ' + Math.round(MAX_SOURCE_BYTES / 1024 / 1024) + ' MB）' })
           return
         }
-        const dir = path.join(runsRoot, 'source')
+        const dir = path.join(runsRoot(), 'source')
         if (!allowAny(dir)) {
           sendJson(res, 403, { ok: false, error: '目录越界' })
           return
@@ -982,7 +1073,7 @@ export async function apply(ctx, rawConfig = {}) {
         const body = JSON.parse(await readBody(req))
         const slug = slugify(body.slug || 'batch', 'batch')
         const mode = sanitizePipelineMode(body.mode) || 'prompt'
-        const root = path.join(runsRoot, 'process')
+        const root = path.join(runsRoot(), 'process')
         if (!allowAny(root)) {
           sendJson(res, 403, { ok: false, error: '过程目录越界' })
           return
@@ -1008,7 +1099,7 @@ export async function apply(ctx, rawConfig = {}) {
   // 早先 plan.json / driver.md / source-*.md / 成图都直接落在 grok-output 根下，
   // 于是"新批次覆盖旧批次"、"同名 slug 的图互相盖"，而 ledger.json 是**追加**的
   // （见下方 save 路由），账上留着两条批次记录、盘上只剩最后一批 —— 账本与产物对不上。
-  const grokRoot = () => path.join(mediaRoot, 'grok-output')
+  const grokRoot = () => path.join(mediaRoot(), 'grok-output')
 
   /** 解析请求体里的批次身份（口径见 BATCH_ROOT 上的注释）。 */
   function wantBatch(body) {
@@ -1382,6 +1473,6 @@ export async function apply(ctx, rawConfig = {}) {
 
   console.log(
     '[dsh-video-prompt] 宿主就绪 · 路由 /dvp/* · 技能 ' + (registered.length ? registered.join(', ') : '未注册')
-    + ' · mediaRoot=' + mediaRoot + ' · runsRoot=' + runsRoot,
+    + ' · mediaRoot=' + mediaRoot() + ' · runsRoot=' + runsRoot(),
   )
 }

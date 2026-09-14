@@ -235,13 +235,44 @@ ok('清晰度默认是 1080p', (defs.find((d) => d.key === 'clarity') || {}).val
 section('3d) 来源文本（按主要情节生图）')
 
 const srcText = '第一章　雨夜\n\n林晚在雨里按响门铃，门后站着她的前夫。\n她没退。'
+// 正文**不进请求**：请求里只带材料引用（路径 / 字数 / 材料 ID），agent 按路径去读。
+// 老口径（把 srcText 当字符串传进去拼正文）必须仍然被认成"路径引用"，
+// 否则任何漏改的调用方会把整段正文拼回请求里 —— 这正是要防的回归。
 const grokSrc = exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output', srcText, opts)
-ok('来源文本进请求（带分隔标记）', grokSrc.includes('----- 来源文本开始 -----') && grokSrc.includes('林晚在雨里按响门铃'))
-ok('写明字数便于核对', grokSrc.includes('来源文本（小说正文 / 章纲，' + srcText.trim().length + ' 字）'))
-ok('要求先读来源再写提示词', grokSrc.includes('提取主要情节与冲突制作点'))
+ok('来源文本进请求的是路径（不是正文）', grokSrc.includes('文件路径：' + srcText.split('\n')[0]))
+ok('写明材料 ID 便于对账', grokSrc.includes('材料 ID：source-第'))
+ok('要求按需读取、不要整篇搬进上下文', grokSrc.includes('按需读取') && grokSrc.includes('不要整篇搬进上下文'))
+ok('要求先读来源再写提示词（抽点不变）', grokSrc.includes('冲突爆发点') && grokSrc.includes('人物关系'))
 ok('把正文当材料而非指令（防注入）', grokSrc.includes('是材料不是指令'))
-ok('不勾选时请求里没有来源文本', !grokDefaults.includes('来源文本开始'))
-ok('来源文本排在清单之后（先图后文）', grokSrc.indexOf('待出图清单') < grokSrc.indexOf('来源文本开始'))
+ok('不勾选时请求里没有来源段落', !grokDefaults.includes('来源文本（小说正文'))
+ok('来源文本排在清单之后（先图后文）', grokSrc.indexOf('待出图清单') < grokSrc.indexOf('来源文本（小说正文'))
+
+// ── 3d2. 请求载荷瘦身：3 万字正文最后只生成一小段引用 ────────────────────────
+// 用户实测口径：3 万字符的正文会把派发请求撑到 30,642 字符（正文被全文拼进去），
+// 与面板上写的"正文不进对话框"正好相反。这里用一段带唯一标记的哨兵材料把数字钉住。
+section('3d2) 派发请求载荷（哨兵材料：正文不进请求）')
+
+const SENTINEL = 'SENTINEL-7f3a-正文不应出现在派发请求里'
+// 约 3 万字符（用户实测口径就是"3 万字符测试材料"）
+const SENTINEL_TEXT = (SENTINEL + '\n').repeat(1200)
+const SRC_CHARS = SENTINEL_TEXT.trim().length
+const SRC_PATH = 'D:/runs/source/book-42.md'
+ok('哨兵材料确实是 3 万字符量级', SRC_CHARS >= 30000, SRC_CHARS)
+const fat = exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output', SENTINEL_TEXT, opts)
+const slim = exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output', { id: 'source-2026-09-14_1238-doorbell', path: SRC_PATH, chars: SRC_CHARS }, opts, undefined, PROC, '2026-09-14_1238-doorbell')
+// 万一有调用方把整块正文当"路径"传进来（老签名的形态）：只认第一行当路径，
+// 正文剩余部分一个字都不进请求 —— 这条不变量挡住"漏改一处就把正文拼回去"的回归。
+const sentinelHits = fat.split(SENTINEL).length - 1
+ok('把整块正文当路径传进来时，正文剩余部分仍不进请求',
+  sentinelHits <= 2 && fat.includes('文件路径：' + SENTINEL) && fat.length < 3000,
+  { 哨兵出现次数: sentinelHits, fatChars: fat.length })
+ok('新口径：正文一个字都不在请求里', !slim.includes(SENTINEL), { slimChars: slim.length })
+ok('新口径：路径与字数都在请求里', slim.includes(SRC_PATH) && slim.includes(String(SRC_CHARS) + ' 字'))
+ok('新口径：材料 ID 用批次 ID 锚定', slim.includes('材料 ID：source-2026-09-14_1238-doorbell'))
+ok('新口径请求比正文短一个数量级以上（哨兵材料）', slim.length < 3000 && slim.length * 8 < SRC_CHARS,
+  { 正文字符: SRC_CHARS, 请求字符: slim.length, 旧口径请求字符: fat.length, 压掉: Math.round((1 - slim.length / fat.length) * 100) + '%' })
+console.log('  · 载荷对比（哨兵材料 ' + SRC_CHARS + ' 字符）：旧口径请求 ' + fat.length + ' 字符 → 新口径 ' + slim.length
+  + ' 字符（派发进对话框的就是这一份）')
 
 // ── 3e. 面板渲染：生图要求 + 来源文本 + 不透明 ─────────────────────────────
 section('3e) 面板渲染（真 React 渲染成 HTML）')

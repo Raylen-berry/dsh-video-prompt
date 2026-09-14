@@ -16,14 +16,17 @@
 //   * 按 plan.json 的序号顺序命名成 `<序号>-<slug>.<ext>`，写进 <out>/ledger.json
 //     （out 指批次目录时，账本与本批产物同处一个目录）
 //   * 已处理过的（同名或同 sha256）跳过，可重复运行
+//   * **真正空闲**才退出：从"最后一次收到图"开始算空闲（`idleExitMs`，默认 20 秒），
+//     并且只在收过图之后才允许退出。每一轮只要收到过图，空闲计时就归零
+//     —— 早先是 `idleRounds` 自增、收到图也不重置，于是第 5 轮必定退出，
+//     边投边出图的长批次会被半路掐断。
 //   * 到点自己退出，不留常驻进程
-//
-// Windows 上 Edge 的默认下载目录是 %USERPROFILE%\Downloads；若你改过下载位置，用 --src 指定。
 
 import { existsSync, promises as fsp } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { createHash } from 'node:crypto'
+import { pathToFileURL } from 'node:url'
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'])
 
@@ -86,24 +89,46 @@ function targetName(entries, index, ext, usedNames) {
   return name
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2))
-  const outDir = path.resolve(args.out || path.join(process.env.DVP_MEDIA_ROOT || 'media', 'grok-output'))
-  const srcDir = path.resolve(args.src || path.join(os.homedir(), 'Downloads'))
-  const deadline = Date.now() + args.minutes * 60 * 1000
+/**
+ * 守一轮或多轮，收图写账。
+ *
+ * options:
+ *   outDir / srcDir        收件箱与下载目录（必填）
+ *   entries                命名用的 plan.entries
+ *   minutes / idleExitMs   最长等待、空闲多久算收工（默认 20 秒）
+ *   minBytes               过滤小图标
+ *   roundMs                每轮间隔（默认 5 秒）
+ *   clock                  取当前时间的函数（默认真实时钟，测试可注入假钟）
+ *   sleep                  (ms) => Promise（默认真等待，测试可注入）
+ *   quiet                  不打日志
+ * 返回 { received, reason, idleMs, ledger }：
+ *   reason = 'idle'（真空闲退出）| 'deadline'（等满分钟数）| 'src-missing'
+ */
+export async function watchDownloads(options = {}) {
+  const outDir = path.resolve(options.outDir)
+  const srcDir = path.resolve(options.srcDir)
+  const minBytes = Number.isFinite(options.minBytes) ? options.minBytes : 20 * 1024
+  const minutes = Number.isFinite(options.minutes) ? options.minutes : 15
+  const idleExitMs = Number.isFinite(options.idleExitMs) ? options.idleExitMs : 20 * 1000
+  const roundMs = Number.isFinite(options.roundMs) ? options.roundMs : 5000
+  const clock = typeof options.clock === 'function' ? options.clock : () => Date.now()
+  const sleep = typeof options.sleep === 'function' ? options.sleep : (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  const say = options.quiet ? () => {} : log
+  const entries = Array.isArray(options.entries) ? options.entries : await readPlan(outDir)
 
   if (!existsSync(srcDir)) {
-    console.error('下载目录不存在：' + srcDir + '（用 --src 指定你实际的下载位置）')
-    process.exit(2)
+    say('下载目录不存在：' + srcDir)
+    return { received: 0, reason: 'src-missing', idleMs: 0, ledger: { items: [] } }
   }
   await fsp.mkdir(outDir, { recursive: true })
 
-  const startedAt = Date.now()
-  log('守护启动 · 监听 ' + srcDir)
-  log('收件箱 ' + outDir + ' · 最长等待 ' + args.minutes + ' 分钟 · 只收 >' + Math.round(args.minBytes / 1024) + 'KB 的图片')
-
-  const entries = await readPlan(outDir)
-  if (entries.length > 0) log('已读到 plan.json：' + entries.length + ' 条（用于命名）')
+  const now0 = clock()
+  const startedAt = now0
+  const deadline = now0 + minutes * 60 * 1000
+  say('守护启动 · 监听 ' + srcDir)
+  say('收件箱 ' + outDir + ' · 最长等待 ' + minutes + ' 分钟 · 只收 >' + Math.round(minBytes / 1024) + 'KB 的图片 · 连续空闲 '
+    + Math.round(idleExitMs / 1000) + ' 秒收工')
+  if (entries.length > 0) say('已读到 plan.json：' + entries.length + ' 条（用于命名）')
 
   const ledger = await readLedger(outDir)
   const doneHashes = new Set(ledger.items.map((i) => i.sha256).filter(Boolean))
@@ -115,14 +140,18 @@ async function main() {
 
   const sizeMemory = new Map()
   let received = 0
-  let idleRounds = 0
+  // 空闲判据：从"最后一次成功收图"算起。收到一张就把计时归零，
+  // 所以只要还有新图进来，就永远不会触发"连续空闲"。
+  let lastReceiveAt = 0
+  let reason = 'deadline'
 
-  while (Date.now() < deadline) {
+  while (clock() < deadline) {
+    let roundReceived = 0
     let names = []
     try {
       names = await fsp.readdir(srcDir)
     } catch (err) {
-      log('读下载目录失败：' + String((err && err.message) || err))
+      say('读下载目录失败：' + String((err && err.message) || err))
     }
 
     for (const name of names) {
@@ -137,7 +166,7 @@ async function main() {
       } catch {
         continue // 可能正在被浏览器写
       }
-      if (stat.size < args.minBytes) continue
+      if (stat.size < minBytes) continue
       const seen = sizeMemory.get(full)
       if (seen !== stat.size) {
         // 还在长，下一轮再看
@@ -163,6 +192,7 @@ async function main() {
       doneFiles.add(target)
       doneHashes.add(sha256)
       received += 1
+      roundReceived += 1
 
       ledger.items.push({
         at: new Date().toISOString(),
@@ -175,24 +205,56 @@ async function main() {
         note: '来自浏览器 Download',
       })
       await writeLedger(outDir, ledger)
-      log('✓ 收起第 ' + received + ' 张：' + name + ' → ' + target + '（' + bytes.length + ' 字节）')
+      say('✓ 收起第 ' + received + ' 张：' + name + ' → ' + target + '（' + bytes.length + ' 字节）')
     }
 
-    if (received > 0 && idleRounds >= 4) {
-      log('已收到 ' + received + ' 张且连续 20 秒无新文件，收工')
+    if (roundReceived > 0) {
+      // 这一轮收到图 → 计时从**现在**重新开始（不是"继续累计空闲轮数"）
+      lastReceiveAt = clock()
+    } else if (received > 0 && clock() - lastReceiveAt >= idleExitMs) {
+      reason = 'idle'
+      say('已收到 ' + received + ' 张，且从最后一次收图起连续 ' + Math.round((clock() - lastReceiveAt) / 1000) + ' 秒没有新图，收工')
       break
     }
-    idleRounds = received > 0 ? idleRounds + 1 : 0
-    await new Promise((resolve) => setTimeout(resolve, 5000))
+    await sleep(roundMs)
   }
 
-  log(received === 0
-    ? '等待超时：这段时间没有新的图片落到下载目录。若你已点过 Download，检查下载位置是否被改过（用 --src 指定）。'
-    : '收工：共收下 ' + received + ' 张，账本 ' + path.join(outDir, 'ledger.json'))
+  const idleMs = lastReceiveAt > 0 ? Math.max(0, clock() - lastReceiveAt) : 0
+  if (received === 0) {
+    say('等待超时：这段时间没有新的图片落到下载目录。若你已点过 Download，检查下载位置是否被改过（用 --src 指定）。')
+  } else if (reason === 'deadline') {
+    say('等满 ' + minutes + ' 分钟：共收下 ' + received + ' 张，账本 ' + path.join(outDir, 'ledger.json'))
+  } else {
+    say('收工：共收下 ' + received + ' 张，账本 ' + path.join(outDir, 'ledger.json'))
+  }
+  return { received, reason, idleMs, ledger }
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2))
+  const outDir = path.resolve(args.out || path.join(process.env.DVP_MEDIA_ROOT || 'media', 'grok-output'))
+  const srcDir = path.resolve(args.src || path.join(os.homedir(), 'Downloads'))
+  const result = await watchDownloads({
+    outDir,
+    srcDir,
+    minutes: args.minutes,
+    minBytes: args.minBytes,
+    // 命令行口径没变：默认 20 秒空闲即收工
+    idleExitMs: 20 * 1000,
+    quiet: args.quiet,
+  })
+  if (result.reason === 'src-missing') {
+    console.error('下载目录不存在：' + srcDir + '（用 --src 指定你实际的下载位置）')
+    process.exit(2)
+  }
   process.exit(0)
 }
 
-main().catch((err) => {
-  console.error(String((err && err.stack) || err))
-  process.exit(1)
-})
+// 只有直接 `node tools/watch-downloads.mjs` 才跑 CLI；被 import 时不启动守护
+// （tools/verify-watch-idle.mjs 就是 import 它来离线断言空闲判据的）。
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(String((err && err.stack) || err))
+    process.exit(1)
+  })
+}

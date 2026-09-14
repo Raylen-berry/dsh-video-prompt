@@ -4,3 +4,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 *.log
+# 离线断言脚本的临时区（tools/probe-host.mjs、tools/verify-*.mjs 跑完自己删）
+tools/.probe-tmp/
+tools/.verify-tmp/
+tools/.tmp-grok-test/
