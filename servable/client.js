@@ -620,7 +620,7 @@ window.__ModuleLoader__.load({
       lines.push('1. browser_open(use:"edge", url:"https://grok.com/")，用我的登录态。')
       lines.push('2. 未登录、有人机验证、或提示额度用尽 —— 停下来告诉我，不要尝试绕过。')
       lines.push('3. 逐条把图片提示词贴进 Grok 输入框发送，等新图出现（单条超时 120 秒就记失败并继续）。')
-      lines.push('4. 每拿到一张图就在页面上下文里把字节直接 POST /dvp/grok/save 落盘（宿主回 file/bytes/sha256 即成功；取不到字节时的兜底也**只能盘到盘**：scan-cache 或让用户点 Download 后 watch-downloads --out 接住，文件名用 `<序号>-<slug>.png`' + (batchId ? '，带上 batchId=' + batchId : '') + '）。')
+      lines.push('4. 每拿到一张图就在页面上下文里把字节直接 POST /dvp/grok/save 落盘（宿主回 file/bytes/sha256 即成功；取不到字节时的兜底也**只能盘到盘**：scan-cache 或让用户点 Download 后 watch-downloads --out 接住，文件名用 `<序号>-<slug>.png`' + (batchId ? '，URL 参数带 batch=' + batchId : '') + '）。')
       lines.push('5. 全部投完给我一份对账：成功 N 张、失败 M 张、失败原因、图片实际路径。')
       lines.push('')
       lines.push('待出图清单：')

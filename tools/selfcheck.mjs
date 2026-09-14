@@ -195,11 +195,14 @@ ok('明确要求登录/人机验证时停下来叫人', grokText.includes('人�
 ok('要求逐条超时与失败继续', grokText.includes('120 秒'))
 ok('要求最后对账', grokText.includes('对账') && grokText.includes('图片实际路径'))
 ok('清单里含图片路径', grokText.includes('a.png') && grokText.includes('b.jpg'))
-// 批次隔离回归：派发请求必须把 batchId 带上，agent 存图时才能进对目录（P1 数据覆盖）
+// 批次隔离回归：派发请求必须把批次带上，agent 存图时才能进对目录（P1 数据覆盖）。
+// 参数名与路由实际读的对齐：raw bytes 模式下批次走 URL 参数 `batch=`（`batchId=` 只存在于 JSON 体里，
+// agent 现在一律走 raw 直传，所以派发请求里必须写 `batch=`，写错就是"图落进最新一批"的老毛病）。
 const grokBatchText = exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output/2026-09-14_1238-doorbell', '', undefined, undefined, '', '2026-09-14_1238-doorbell')
 ok('派发请求写明批次 ID', grokBatchText.includes('批次 ID：2026-09-14_1238-doorbell'))
-ok('派发请求要求存图带 batchId', grokBatchText.includes('batchId=2026-09-14_1238-doorbell'))
-ok('不传批次时这两行不出现（老调用方不受影响）', !grokNoDocs.includes('批次 ID：') && !grokNoDocs.includes('batchId='))
+ok('派发请求要求存图带 batch=批次ID（raw 直传的 URL 参数）', grokBatchText.includes('batch=2026-09-14_1238-doorbell'))
+ok('派发请求要求字节直传而非 base64 搬回会话', grokBatchText.includes('raw') || grokBatchText.includes('字节'))
+ok('不传批次时这三行不出现（老调用方不受影响）', !grokNoDocs.includes('批次 ID：') && !grokNoDocs.includes('batch='))
 
 // ── 3c. 生图要求（可选项）──────────────────────────────────────────────────
 section('3c) 生图要求（可选项）')
