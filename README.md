@@ -167,6 +167,31 @@
 注意 dsh-skill 对同名 runtime 技能是 **first-wins**：reload 只补新名字，**改已有技能的正文仍需重启**
 （响应里会如实区分 `added` / `alreadyRegistered`）。
 
+## 发布前检查（CI 与本地同一条命令）
+
+push / PR 都会跑 `.github/workflows/ci.yml`，它只做一件事：`npm test`。本地跑的就是同一条命令，
+**不装任何依赖、不联网、不读真实媒体盘、不调模型**：
+
+```bash
+npm test                       # = node tools/run-all.mjs
+node tools/run-all.mjs --list  # 只看清单：跑哪些、以及哪些被排除、为什么
+```
+
+`tools/run-all.mjs` 把每套都跑完再汇总，任一套非 0 退出 ⇒ `npm test` 退出码 1 ⇒ CI 变红。
+CI 用 Node 20/22/24 三档矩阵、windows-latest。
+
+本机实测（Node 24.9.0）参与门禁的两套：
+
+| 套件 | 本机结果 |
+| --- | --- |
+| `tools/probe-host.mjs` | 187 项通过 |
+| `tools/verify-watch-idle.mjs` | 18 项通过 |
+
+**未纳入 CI** 的套件（原因同时写在 `tools/run-all.mjs` 的 `EXCLUDED` 里）：
+`tools/probe-live.mjs`（要真实媒体盘里的素材）、
+`tools/selfcheck.mjs`（230 项，但用 `createRequire` 从本机 DSH 安装目录解析 `react`/`react-dom`，
+CI 里没有这两包 ⇒ 想纳入就先给 `package.json` 加这两个开发依赖、并让 `DSH_APP_DIR` 指向仓库根）。
+
 ## 安装（已经装好，这里是复现方式）
 
 ```bash
