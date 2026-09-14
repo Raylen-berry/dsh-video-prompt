@@ -361,6 +361,11 @@ ok('layoutPanel 里没有 howto 特例分支了（isHowto 判定已删）', !/is
 ok('生图要求 / 来源文本不再因大纲敞开而让位', !/\(howtoOpen \|\| isViral\) \? null/.test(source))
 ok('抽屉带独立关闭入口', /data-dvp-howto-drawer/.test(source) && /onClick: function \(\) \{ setHowtoOpen\(false\) \}/.test(source))
 ok('默认态里素材三列常驻（与大纲入口同屏）', panelHtml.includes('dvp-cols') && panelHtml.includes('看大纲'))
+// v0.5.0：发送前体积提示（请求字数 + 估算 token + 素材数 + "正文不进请求"）
+ok('页脚有体积提示位（sizeHint）', /function sizeHint\(\)/.test(source) && /h\('div', \{ className: 'dvp-hint' \}, sizeHint\(\)\)/.test(source))
+ok('体积提示用与派发同一批构建器算预览', /var requestPreview = useMemo\(/.test(source) && /buildDispatchRequest\(items, sourceDir\(\), runsRoot, ''\)/.test(source))
+ok('token 只标估算（不装精确）', /token，估算/.test(source))
+ok('提示里写明正文只带路径与字数', /正文不进请求/.test(source))
 // v0.4.0：素材行不再显示文件大小（用户 2026-09-14：名称/大小/时间三样里，大小没人看还占宽）
 ok('素材行不再推入文件大小', !/item\.bytes\) dim\.push\(formatBytes/.test(source) && !/dim\.push\(formatBytes/.test(source))
 // v0.4.0：三列各有自己的色条（video/image/text），一眼分得开

@@ -1567,6 +1567,25 @@ window.__ModuleLoader__.load({
         )
       }
 
+      /** 发送前体积提示（v0.5.0）：算一遍**将要发出去的那段文本**的字数（纯函数、便宜），
+       *  并明确写出"正文不进请求"这件事 —— 免得粘了 8 万字正文的人以为要按 8 万字收费。
+       *  token 只能给估算（不同分词器差得多），所以标"约/估算"，不装精确。 */
+      function sizeHint() {
+        var chars = requestPreview.length
+        if (chars === 0) return '请求体积：还没有可发的内容'
+        var parts = []
+        parts.push('请求约 ' + chars + ' 字（约 ' + Math.round(chars / 1.5) + ' token，估算）')
+        if (isCopy) {
+          parts.push('书单 ' + copyBookList().length + ' 本（正文由 agent 抓，不进请求）')
+        } else {
+          parts.push('素材 ' + (isVideoTab ? chosenOf(chosen, 'video').length + ' 视频' : chosen.length + ' 项'))
+          if (useSource && sourceText.trim() !== '') {
+            parts.push('来源正文 ' + sourceText.length + ' 字**只带路径与字数**，正文不进请求')
+          }
+        }
+        return parts.join(' · ')
+      }
+
       /** 当前栏目的说明（标题旁那行小字）。 */
       function tabHint() {
         for (var i = 0; i < PANEL_TABS.length; i++) if (PANEL_TABS[i].id === tab) return PANEL_TABS[i].hint
@@ -1666,6 +1685,18 @@ window.__ModuleLoader__.load({
       var chosenImages = chosenOf(chosen, 'image').length
       var chosenVideos = chosenOf(chosen, 'video').length
       var chosenDocs = chosenOf(chosen, 'text').length
+
+      // 发送前体积提示用的请求预览（跟真正派发用同一批构建器，只是过程目录留空）
+      var requestPreview = useMemo(function () {
+        try {
+          if (isCopy) return buildCopyRequest(copyBookList(), copyPrompt.trim(), runsRoot, '')
+          var items = isVideoTab ? chosenOf(chosen, 'video') : chosen
+          if (pipelineMode === 'viral') return buildViralRequest(items, sourceDir(), runsRoot, '')
+          return buildDispatchRequest(items, sourceDir(), runsRoot, '')
+        } catch (err) {
+          return ''
+        }
+      }, [isCopy, isVideoTab, chosen, pipelineMode, runsRoot, copyBooks, copyPrompt, folder, localFiles, data])
 
       return h('div', { className: 'dvp-panel', 'data-dvp-tab': tab, ref: wrapRef },
         h('div', { className: 'dvp-head' },
@@ -1817,19 +1848,19 @@ window.__ModuleLoader__.load({
 
         // 素材区已挪到"挑文件夹"那一行下面（见上面的 renderMaterialBody()）；这里只剩页脚。
         h('div', { className: 'dvp-foot' },
-          // 说明压到最短：这一行太长会把底部按钮挤到面板外面（窄屏实测过）
-          h('div', { className: 'dvp-hint' },
-            isCopy
-              ? '书单 ' + copyBookList().length + ' 本。点「准备文案请求」把请求写进输入框 —— 还没开始跑，按 Enter 才发送。'
-              : isVideoTab
-                ? '已选视频 ' + chosenVideos + ' 个（本栏目只算子视频）。点「准备视频请求」写入输入框，按 Enter 才发送。'
-                : isViral
-                  ? '已选 ' + chosen.length + ' 项（视频 ' + chosenVideos + ' · 图片 ' + chosenImages + (chosenDocs ? ' · 文档 ' + chosenDocs : '') + '）。点「准备分析请求」：先建过程目录（年-月-日_时分），再把分析请求写进输入框 —— 还没开始跑，按 Enter 才发送。'
-                  : '已选 ' + chosen.length + ' 项（视频 ' + chosenVideos + ' · 图片 ' + chosenImages + (chosenDocs ? ' · 文档 ' + chosenDocs : '') + '）。点「准备生图请求」写入输入框，按 Enter 才发送，回车前还能改。',
-          ),
+          // 说明压到最短：这一行太长会把底部按钮挤到面板外面（窄屏实测过）。
+          // v0.5.0 起这一行改报**发送前体积**（请求字数 + 估算 token + 素材数 + 正文不进请求），
+          // 比原来那句"已选 N 项"信息量大，且直接回答"这一发要花多少"。
+          h('div', { className: 'dvp-hint' }, sizeHint()),
+          h('div', { className: 'dvp-hint' }, isCopy
+            ? '点「准备文案请求」把请求写进输入框 —— 还没开始跑，按 Enter 才发送。'
+            : isVideoTab
+              ? '点「准备视频请求」写入输入框，按 Enter 才发送（本栏目只算子视频）。'
+              : isViral
+                ? '点「准备分析请求」：先建过程目录（年-月-日_时分），再把分析请求写进输入框 —— 还没开始跑，按 Enter 才发送。'
+                : '点「准备生图请求」写入输入框，按 Enter 才发送，回车前还能改。'),
           h('div', { className: 'dvp-btns' },
-            h('button', { className: 'dvp-btn', type: 'button', onClick: clearDraftNow, title: '丢掉面板记住的草稿（正文 / 书单 / 本地挑选的文件 / 勾选）。收起面板不会丢草稿，要丢点这里' }, '清空草稿'),
-            h('button', { className: 'dvp-btn', type: 'button', onClick: copyRequest }, '复制请求'),
+            h('button', { className: 'dvp-btn', type: 'button', onClick: clearDraftNow, title: '丢掉面板记住的草稿（正文 / 书单 / 本地挑选的文件 / 勾选）。收起面板不会丢草稿，要丢点这里' }, '清空草稿'),            h('button', { className: 'dvp-btn', type: 'button', onClick: copyRequest }, '复制请求'),
             // 「用 Grok 生图」只服务生图栏目（图片素材）
             (isCopy || isViral || isVideoTab) ? null : h('button', { className: 'dvp-btn', type: 'button', onClick: dispatchGrok, disabled: chosenImages === 0, title: chosenImages === 0 ? 'Grok 出图只吃图片' : '建 Grok 批次并驱动 Edge 出图' }, '用 Grok 生图'),
             // 主按钮只说它真正做的事：把请求"准备"进输入框。任务由用户按 Enter 才开跑，
