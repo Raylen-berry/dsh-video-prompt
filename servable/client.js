@@ -63,7 +63,7 @@ window.__ModuleLoader__.load({
       '[data-dvp-chip] .dvp-count{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:15px;padding:0 5px;border-radius:4px;font-size:10.5px;line-height:1;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.25));color:var(--dsw-alias-label-tertiary)}',
       '.dvp-wrap{position:relative;display:inline-flex;align-items:center}',
       '.dvp-panel{position:absolute;z-index:60;top:calc(100% + 8px);left:0;width:720px;max-width:calc(100vw - 48px);max-height:calc(100dvh - 48px);display:flex;flex-direction:column;gap:10px;padding:14px;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.28));border-radius:14px;isolation:isolate;background:var(--dsw-alias-bg-module-platform,#fff);background-image:linear-gradient(var(--dsw-alias-bg-module-platform,#fff),var(--dsw-alias-bg-module-platform,#fff));box-shadow:0 18px 48px rgba(0,0,0,.28);overflow:hidden}',
-      '.dvp-body{flex:0 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column;gap:10px}',
+      '.dvp-body{flex:0 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column;gap:10px;position:relative}',
       // 面板直接子节点默认不伸缩，高度由 layoutPanel() 实测分配；中段例外（见上一条，
       // 它必须能被压缩并自己滚）。`min-height:0` 是压住 flex 默认最小内容高度的关键，
       // 少了它中段的最小内容高度会顶住父级，面板整体溢出视口（预览页实测过）。
@@ -123,13 +123,15 @@ window.__ModuleLoader__.load({
       '.dvp-hint{font-size:11px;color:var(--dsw-alias-label-tertiary);line-height:1.6;flex:1 1 auto;min-width:150px;max-width:380px}',
       '.dvp-fileRow{display:flex;align-items:center;gap:6px;flex-wrap:nowrap}',
       '.dvp-pathInput{flex:1;min-width:120px;font-size:11px;height:26px}',
-      '.dvp-howtoBody{height:min(32vh,190px);min-height:120px;overflow:auto;display:flex;flex-direction:column;gap:6px;padding:2px 2px 0;box-sizing:border-box}',
+      '.dvp-howtoBody{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:6px;padding:2px 2px 0;box-sizing:border-box}',
       '.dvp-howtoItem{display:flex;flex-direction:column;gap:2px;font-size:11.5px;line-height:1.7;color:var(--dsw-alias-label-secondary)}',
       '.dvp-howtoItem b{color:var(--dsw-alias-label-primary);font-weight:600}',
-      // 大纲展开时，它自己撑满中段；中段外的固定部分已经收过一遍（见渲染里的 howtoOpen 分支）
-      '.dvp-body-howto{flex:0 0 auto;min-height:0;overflow:visible}',
-      '.dvp-howto-open{position:relative;min-height:0;padding-bottom:calc(min(32vh,190px) + 46px)}',
-      '.dvp-howto-open .dvp-howtoBody{position:absolute;left:2px;right:2px;top:36px}',
+      // 大纲抽屉（v0.3.0）：盖在中段上，**素材列表原地不动**。
+      // 旧写法是"展开大纲就把素材列表收掉"（当时为了不让两块同时展开把底部按钮顶出面板），
+      // 代价是没法边看说明边核对素材（用户 2026-09-14 反馈）。抽屉绝对定位、自带滚动，
+      // 不参与面板高度计算 ⇒ 底部按钮的位置不受影响。
+      '.dvp-drawer{position:absolute;inset:0;z-index:6;display:flex;flex-direction:column;gap:8px;padding:10px;box-sizing:border-box;overflow:hidden;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.28));border-radius:10px;background:var(--dsw-alias-bg-layer-2,var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-base,#fff)));box-shadow:0 8px 24px rgba(0,0,0,.18)}',
+      '.dvp-drawerHead{flex:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
       '.dvp-warn{font-size:11px;color:var(--dsw-alias-state-error-primary,#e5534b)}',
       '.dvp-ok{font-size:11px;color:var(--dsw-alias-state-success-primary,#2da44e)}',
       '.dvp-toast{position:fixed;z-index:80;bottom:26px;left:50%;transform:translateX(-50%);padding:9px 14px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));background:var(--dsw-alias-bg-module-platform,#fff);color:var(--dsw-alias-label-primary);font-size:12px;box-shadow:0 12px 32px rgba(0,0,0,.25)}',
@@ -248,26 +250,11 @@ window.__ModuleLoader__.load({
 
     function layoutPanel(panel, roomPx) {
       if (!panel || typeof panel.querySelector !== 'function' || typeof panel.children === 'undefined') return
-      // 中段可滚动元素：平时是素材列表容器，大纲展开时是大纲自己
-      var body = panel.querySelector('.dvp-body') || panel.querySelector('.dvp-howto-open')
+      // 中段可滚动元素：素材列表容器。v0.3.0 起大纲是**盖在它上面的抽屉**（绝对定位 +
+      // 自带滚动），不参与面板高度计算 ⇒ 这里不再有"大纲自己就是中段"的特例分支
+      //（旧分支靠 dvp-body-howto 类名判定，写错一个就静默走错分支，实测踩过一次）。
+      var body = panel.querySelector('.dvp-body')
       if (!body) return
-      // 大纲展开时它自己就是中段：别给它写死高度（否则会跟 flex 抢空间，实测把面板顶出 59px），
-      // 只把固定部分撑出来的部分交给面板整体滚动。
-      // 判据用容器类名 dvp-body-howto（不是 dvp-howto-open —— 那是里层那个区块的类，
-      // 写错一个就静默走错分支，实测踩过一次）。
-      var isHowto = typeof body.className === 'string' && body.className.indexOf('dvp-body-howto') >= 0
-      if (isHowto) {
-        body.style.height = ''
-        var howtoChrome = 0
-        for (var hi = 0; hi < panel.children.length; hi++) {
-          if (panel.children[hi] !== body) howtoChrome += panel.children[hi].offsetHeight || 0
-        }
-        var howtoLimit = roomPx > 0 ? roomPx : (window.innerHeight || 0) - 48
-        var howtoOver = howtoChrome + 10 * Math.max(0, panel.children.length - 1) + 28 > howtoLimit
-        panel.style.overflowY = howtoOver ? 'auto' : 'hidden'
-        panel.dataset.tight = howtoOver ? 'true' : 'false'
-        return
-      }
       var limit = roomPx > 0 ? roomPx : (window.innerHeight || 0) - 48
       var fixed = 0
       var count = 0
@@ -1363,35 +1350,61 @@ window.__ModuleLoader__.load({
         )
       }
 
-      // ── 背后的 skill 逻辑（用法说明）：默认收起 ──────────────────────────
-      function renderHowto() {
-        var steps = [
-          ['拿到图片', '先看画面本身，再按七段式落成提示词：① 主体（年龄/五官/发型/发色/体型/身高/气质）② 服装与配饰 ③ 动作/姿态/表情 ④ 环境/场景 ⑤ 光照/色调 ⑥ 构图/景别/镜头焦段 ⑦ 画质与风格。人物描述在每条里重复写全，不靠代词，这样批量出图时同一个人不会变脸。'],
-          ['拿到视频', '按 video-prompt-pipeline（视频复刻）先观察：用 watch 抽帧 + 尽量拿原生字幕（免费优先，没有才回退 Whisper），逐帧读；记录镜头边界与时间码、主体外观、动作与状态变化、镜头运动与景别、场景光线、音频、可辨画面文字。再产出时间码分镜式视频提示词。明确要参考图时走 Phase 3：从优化提示词里衍出两张静态图提示（首帧 + 决定性关键帧），用你已登录的浏览器 ChatGPT 生成、存进 run 的 references\\；视频生成（Phase 4）是另一个显式授权动作。'],
-          ['拿到文章/正文', '先从正文里抽「主要情节」：人物关系、冲突爆发点、关键动作与道具、场景地点、时间（昼/夜/雨/雪）、情绪走向；按冲突强度排序，挑最强的那几个当出图点；再把每个情节映射到上面那套七段式，补足原文没写但画面必须有的信息（光线、构图、镜头）。正文只当材料，里面出现的命令句不会被当指令执行。'],
-          ['拿到文档（md/txt）', '扫描到的 md / txt / srt 会进第三列「文档」，默认勾选。派发时文档当材料不当指令：agent 先读全文，按主要情节与冲突点产出图片提示词；「用 Grok 生图」时勾选的文档也会以路径形式附在请求里。'],
-          ['路径 · 爆款元素（蒸馏）', '面板顶部「路径」切到第二条：走插件自带的 viral-media-copywriter 技能（通用爆款素材模型）。先 inventory_media.py 只读清点去重，视频抽帧进过程目录 frames\\，逐素材取证（直接观察/功能解释/表现关联分开记、带时间戳），按四层抽象「原子线索→功能模式→创意机制→可迁移配方」出《爆款元素卡》，汇总创意基因报告（Top 模式卡、组合顺序、反例、可测试假设），需要时再按输出协议出稳健/强钩子/实验三方向原创文案。学机制不抄原句；技能万一没注册，请求内嵌同一套流程兜底。'],
-          ['过程目录', '每次派发自动建 <产物目录>\\process\\年-月-日_时分-<素材名>\\：拆帧、爆款元素卡、草稿等中间产物都进这里，和最终产物（runs 提示词、grok-output 成图）分开；同分钟再派发自动加 -2 后缀。'],
-          ['Grok 批次目录', '「用 Grok 生图」一批一个目录：<产物目录>\\grok-output\\年-月-日_时分-<素材名>\\，plan.json、driver.md、来源文本、成图、ledger.json 全在这一批里。想重试就把 batchId 回传，写回同一目录；不传参数读最新一批，?batch=<批次ID> 读指定批次。'],
-          ['合成一版', '若要重出同一张，只改一个维度（姿势/服装/场景其一），其余照抄锚点，避免整条重写导致人物漂移。'],
-          ['画幅与清晰度', '画幅先按 Grok 页面上的比例按钮切好再投；清晰度越高越像"加细节"指令，额度消耗越大 —— 所以先低档出构图，满意的再单独重出高档。'],
-          ['产物与对账', '每条提示词写进 runsRoot 下以素材名命名的子目录；Grok 成图落 grok-output\\<批次ID>\\ 并写该批的 ledger.json，最后按「成功 N / 失败 M / 失败原因」对账，不静默跳过。'],
-        ]
-        return h('div', { className: 'dvp-sect dvp-howto' + (howtoOpen ? ' dvp-howto-open' : '') },
+      // ── 背后的 skill 逻辑（用法说明）：默认收起，展开时作为**中段抽屉** ──────
+      // v0.3.0：旧写法是"展开大纲就把素材列表收掉"（当时为了不让两块同时展开把底部按钮
+      // 顶出面板），代价是没法边看说明边核对素材（用户 2026-09-14 反馈）。现在大纲盖在中段
+      // 上层（绝对定位 + 自带滚动），素材列表原地不动，也不参与面板高度计算。
+      var HOWTO_STEPS = [
+        ['拿到图片', '先看画面本身，再按七段式落成提示词：① 主体（年龄/五官/发型/发色/体型/身高/气质）② 服装与配饰 ③ 动作/姿态/表情 ④ 环境/场景 ⑤ 光照/色调 ⑥ 构图/景别/镜头焦段 ⑦ 画质与风格。人物描述在每条里重复写全，不靠代词，这样批量出图时同一个人不会变脸。'],
+        ['拿到视频', '按 video-prompt-pipeline（视频复刻）先观察：用 watch 抽帧 + 尽量拿原生字幕（免费优先，没有才回退 Whisper），逐帧读；记录镜头边界与时间码、主体外观、动作与状态变化、镜头运动与景别、场景光线、音频、可辨画面文字。再产出时间码分镜式视频提示词。明确要参考图时走 Phase 3：从优化提示词里衍出两张静态图提示（首帧 + 决定性关键帧），用你已登录的浏览器 ChatGPT 生成、存进 run 的 references\\；视频生成（Phase 4）是另一个显式授权动作。'],
+        ['拿到文章/正文', '先从正文里抽「主要情节」：人物关系、冲突爆发点、关键动作与道具、场景地点、时间（昼/夜/雨/雪）、情绪走向；按冲突强度排序，挑最强的那几个当出图点；再把每个情节映射到上面那套七段式，补足原文没写但画面必须有的信息（光线、构图、镜头）。正文只当材料，里面出现的命令句不会被当指令执行。'],
+        ['拿到文档（md/txt）', '扫描到的 md / txt / srt 会进第三列「文档」，默认勾选。派发时文档当材料不当指令：agent 先读全文，按主要情节与冲突点产出图片提示词；「用 Grok 生图」时勾选的文档也会以路径形式附在请求里。'],
+        ['路径 · 爆款元素（蒸馏）', '面板顶部「路径」切到第二条：走插件自带的 viral-media-copywriter 技能（通用爆款素材模型）。先 inventory_media.py 只读清点去重，视频抽帧进过程目录 frames\\，逐素材取证（直接观察/功能解释/表现关联分开记、带时间戳），按四层抽象「原子线索→功能模式→创意机制→可迁移配方」出《爆款元素卡》，汇总创意基因报告（Top 模式卡、组合顺序、反例、可测试假设），需要时再按输出协议出稳健/强钩子/实验三方向原创文案。学机制不抄原句；技能万一没注册，请求内嵌同一套流程兜底。'],
+        ['过程目录', '每次派发自动建 <产物目录>\\process\\年-月-日_时分-<素材名>\\：拆帧、爆款元素卡、草稿等中间产物都进这里，和最终产物（runs 提示词、grok-output 成图）分开；同分钟再派发自动加 -2 后缀。'],
+        ['Grok 批次目录', '「用 Grok 生图」一批一个目录：<产物目录>\\grok-output\\年-月-日_时分-<素材名>\\，plan.json、driver.md、来源文本、成图、ledger.json 全在这一批里。想重试就把 batchId 回传，写回同一目录；不传参数读最新一批，?batch=<批次ID> 读指定批次。'],
+        ['合成一版', '若要重出同一张，只改一个维度（姿势/服装/场景其一），其余照抄锚点，避免整条重写导致人物漂移。'],
+        ['画幅与清晰度', '画幅先按 Grok 页面上的比例按钮切好再投；清晰度越高越像"加细节"指令，额度消耗越大 —— 所以先低档出构图，满意的再单独重出高档。'],
+        ['产物与对账', '每条提示词写进 runsRoot 下以素材名命名的子目录；Grok 成图落 grok-output\\<批次ID>\\ 并写该批的 ledger.json，最后按「成功 N / 失败 M / 失败原因」对账，不静默跳过。'],
+      ]
+
+      /** 大纲抽屉：盖在中段上（素材列表原地不动）；关着时不渲染。 */
+      function renderHowtoDrawer() {
+        if (!howtoOpen) return null
+        return h('div', { className: 'dvp-drawer', 'data-dvp-howto-drawer': '1' },
+          h('div', { className: 'dvp-drawerHead' },
+            h('b', null, '背后的逻辑'),
+            h('span', { className: 'dvp-sub' }, '拿到素材后按什么规则出提示词（初版，可改）'),
+            h('div', { style: { flex: '1' } }),
+            h('button', {
+              className: 'dvp-btn',
+              type: 'button',
+              onClick: function () { setHowtoOpen(false) },
+              title: '关掉大纲，回到素材列表（素材一直没动）',
+            }, '关闭'),
+          ),
+          h('div', { className: 'dvp-howtoBody' }, HOWTO_STEPS.map(function (pair, index) {
+            return h('div', { className: 'dvp-howtoItem', key: String(index) },
+              h('b', null, pair[0]),
+              h('span', null, pair[1]),
+            )
+          })),
+        )
+      }
+
+      /** 大纲那一行：位置固定在中段下方，只负责开合抽屉。 */
+      function renderHowtoHead() {
+        return h('div', { className: 'dvp-sect dvp-howto', 'data-dvp-howto-open': howtoOpen ? '1' : '0' },
           h('div', { className: 'dvp-sectHead' },
             h('span', { className: 'dvp-sectTitle' }, '背后的逻辑'),
             h('span', { className: 'dvp-sub' }, '拿到素材后按什么规则出提示词（初版，可改）'),
             h('div', { style: { flex: '1' } }),
-            h('button', { className: 'dvp-btn', type: 'button', onClick: function () { setHowtoOpen(!howtoOpen) } }, howtoOpen ? '收起' : '看大纲'),
+            h('button', {
+              className: 'dvp-btn',
+              type: 'button',
+              onClick: function () { setHowtoOpen(!howtoOpen) },
+              title: '盖在中段上的一层说明，关掉就回到素材列表（素材与勾选不受影响）',
+            }, howtoOpen ? '收起' : '看大纲'),
           ),
-          howtoOpen
-            ? h('div', { className: 'dvp-howtoBody' }, steps.map(function (pair, index) {
-              return h('div', { className: 'dvp-howtoItem', key: String(index) },
-                h('b', null, pair[0]),
-                h('span', null, pair[1]),
-              )
-            }))
-            : null,
         )
       }
 
@@ -1472,8 +1485,8 @@ window.__ModuleLoader__.load({
         ),
 
         // ── 生图要求（可选项）：默认值就能跑，想调再动 ──────────────────────
-        // 大纲展开或爆款路径时让位：生图要求只服务 Grok 出图；两块同时展开会把底部按钮顶出面板（实测要多滚 489px）
-        (howtoOpen || isViral) ? null : h('div', { className: 'dvp-sect' },
+        // v0.3.0：大纲不再占版面（它是中段抽屉），所以这里只按路径让位（爆款路径只服务图片/视频素材）
+        isViral ? null : h('div', { className: 'dvp-sect' },
           h('div', { className: 'dvp-sectHead' },
             h('span', { className: 'dvp-sectTitle' }, '生图要求'),
             h('span', { className: 'dvp-sub' }, '可选项 · 默认即可用'),
@@ -1511,7 +1524,7 @@ window.__ModuleLoader__.load({
 
         // ── 来源文本（小说免费章节 / 章纲）：按主要情节生图 ─────────────────
         // 爆款路径不带小说正文（素材就是视频/图片本身），所以同样让位
-        (howtoOpen || isViral) ? null : h('div', { className: 'dvp-sect' },
+        isViral ? null : h('div', { className: 'dvp-sect' },
           h('div', { className: 'dvp-sectHead' },
             h('span', { className: 'dvp-sectTitle' }, '来源文本'),
             h('span', { className: 'dvp-sub' }, '小说免费章节 / 章纲，按主要情节生图'),
@@ -1559,25 +1572,24 @@ window.__ModuleLoader__.load({
           sourcePath ? h('div', { className: 'dvp-sub' }, '已落盘：' + sourcePath + (sourceChars ? '（' + sourceChars + ' 字）· 请求里只带路径与字数' : '')) : null,
         ),
 
-        renderHowto(),
+        renderHowtoHead(),
 
         error ? h('div', { className: 'dvp-warn' }, error) : null,
         !error && note ? h('div', { className: 'dvp-ok' }, note) : null,
 
         // 中段可压缩滚动：面板整体不越出视口，表头与底部按钮始终在视野里。
-        // 大纲展开时先把素材列表收掉：两样一起展开会把底部三个按钮顶出面板
-        // （实测：大纲全开时面板要多滚 489px 才够，等于把按钮藏起来了）。
-        howtoOpen
-          ? h('div', { className: 'dvp-body dvp-body-howto' },
-            h('div', { className: 'dvp-sub' }, '大纲展开时先收起素材列表 —— 收起大纲就回来。'),
-          )
-          : h('div', { className: 'dvp-body' },
-            h('div', { className: 'dvp-cols' },
-              renderColumn(VIDEO_LABEL, videos, 'video'),
-              renderColumn(IMAGE_LABEL, images, 'image'),
-              renderColumn(TEXT_LABEL, texts, 'text'),
-            ),
+        // 中段可压缩滚动：面板整体不越出视口，表头与底部按钮始终在视野里。
+        // v0.3.0：素材列表**常驻**，大纲改成盖在它上面的一层抽屉（.dvp-drawer，绝对定位 +
+        // 自带滚动）—— 于是"看大綱"不再把素材列表拿走，主操作区稳定（用户 2026-09-14 反馈），
+        // 也不会因为多开一块把底部按钮顶出面板（抽屉不参与高度计算）。
+        h('div', { className: 'dvp-body' },
+          h('div', { className: 'dvp-cols' },
+            renderColumn(VIDEO_LABEL, videos, 'video'),
+            renderColumn(IMAGE_LABEL, images, 'image'),
+            renderColumn(TEXT_LABEL, texts, 'text'),
           ),
+          renderHowtoDrawer(),
+        ),
 
         h('div', { className: 'dvp-foot' },
           // 说明压到最短：这一行太长会把底部按钮挤到面板外面（窄屏实测过）

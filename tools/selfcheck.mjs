@@ -352,6 +352,13 @@ ok('大纲默认收起（只给「看大纲」按钮）', panelHtml.includes('�
 ok('大纲覆盖图片/视频/文章三条输入', source.includes('拿到图片') && source.includes('拿到视频') && source.includes('拿到文章/正文'))
 ok('大纲写了七段式与情节抽取规则', source.includes('七段式') && source.includes('主要情节') && source.includes('冲突'))
 ok('大纲新增爆款路径与过程目录两节', source.includes('爆款元素卡') && source.includes('viral-summary.md') && source.includes('过程目录'))
+// v0.3.0：大纲从「展成正文 + 把素材列表收掉」改成「中段抽屉盖上去」（用户 2026-09-14 反馈：
+// 展开说明就没法核对素材）。这几条锁死"素材列表不再被大纲分支掉"这个行为，防止改回去。
+ok('大纲是抽屉而不是让素材列表让位的分支', source.includes('dvp-drawer') && !source.includes("'dvp-body dvp-body-howto'"))
+ok('layoutPanel 里没有 howto 特例分支了（isHowto 判定已删）', !/isHowto/.test(source))
+ok('生图要求 / 来源文本不再因大纲敞开而让位', !/\(howtoOpen \|\| isViral\) \? null/.test(source))
+ok('抽屉带独立关闭入口', /data-dvp-howto-drawer/.test(source) && /onClick: function \(\) \{ setHowtoOpen\(false\) \}/.test(source))
+ok('默认态里素材三列常驻（与大纲入口同屏）', panelHtml.includes('dvp-cols') && panelHtml.includes('看大纲'))
 
 // 弹框透明度：面板背景必须是实色，且带一层实色 background-image 兜底
 const cssBlock = /var CSS = \[([\s\S]*?)\]\.join\('\\n'\)/.exec(source)
