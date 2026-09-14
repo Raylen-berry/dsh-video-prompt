@@ -25,6 +25,9 @@ const CHECKS = []
 const SUITES = [
   'tools/probe-host.mjs',
   'tools/verify-watch-idle.mjs',
+  // 图片字节不许进会话文本：raw bytes 直传 /dvp/grok/save + 会话文本 base64=0 的量化断言。
+  // 假图自己捏（固定种子伪随机字节，≥1 MiB），不联网、不读真实媒体盘、不用浏览器。
+  'tools/verify-grok-bytes.mjs',
   // selfcheck 里的面板渲染要一份真 react / react-dom（createRequire(DSH_APP_DIR/package.json) 解析）。
   // 原来它指向**本机 DSH 安装目录**（DSH_APP_DIR 没设时还会从 process.execPath 反推），
   // 于是"本机全绿、干净机器/CI 全红"。现在由下面的 ENV 把 DSH_APP_DIR 指向**仓库根**，

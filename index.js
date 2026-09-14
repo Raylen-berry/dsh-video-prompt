@@ -17,7 +17,8 @@
 //                                            拆帧、爆款元素分析等中间产物都写这里
 //        POST /dvp/source                    把「来源文本」（小说正文/章纲）落盘成文件
 //        POST /dvp/grok/plan                 建 Grok 出图批次（含生图要求与来源文本）
-//        POST /dvp/grok/save                 保存抓到的成图字节
+//        POST /dvp/grok/save                 保存抓到的成图字节（首选 raw bytes 直传，
+//                                            兼容 JSON base64/URL；响应只回元信息，字节不进会话）
 //        POST /dvp/skills/reload             重扫技能目录：开机后新增的技能免重启注册
 //                                            （同名 first-wins，改已有技能正文仍需重启）
 //
@@ -36,6 +37,7 @@
 
 import { createReadStream, existsSync, promises as fsp, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
 
@@ -299,7 +301,9 @@ async function touchGrokIndex(root, batchId) {
 
 // ── Grok 驱动清单（写给人看，也写给会话里的 agent 看）────────────────────────
 
-function driverDoc(plan) {
+// 导出只为离线断言：tools/verify-grok-bytes.mjs 要直接验"这份清单里没有 base64 搬运通道"，
+// 不必起 HTTP 服务。纯函数（只读 plan 对象 + path.join），无副作用。
+export function driverDoc(plan) {
   const lines = []
   lines.push('# Grok 出图驱动清单')
   lines.push('')
@@ -336,8 +340,11 @@ function driverDoc(plan) {
   if (plan.sourceFile) {
     lines.push('   提示词要对着来源文本里的具体情节写：先读 ' + plan.sourceFile + '，再动笔。')
   }
-  lines.push('4. 每拿到一张图，调 `POST /dvp/grok/save`（base64 或图片 URL + index/slug'
-    + (plan.batchId ? ' + batchId="' + plan.batchId + '"（同一批的图必须进同一目录）' : '') + '）落盘。')
+  lines.push('4. 每拿到一张图，在**页面上下文里**把成图字节原样 `POST /dvp/grok/save?index=<序号>&slug=<slug>'
+    + (plan.batchId ? '&batch=' + plan.batchId : '')
+    + '`（raw bytes，宿主回 {file,bytes,sha256,width,height} 元信息即算落盘成功；'
+    + (plan.batchId ? '同一批的图必须带同一个 batch，才会进同一目录；' : '')
+    + '图片内容/base64 一律不进会话文本）。')
   lines.push('5. 全部投完检查 ' + path.join(plan.dir, 'ledger.json') + ' 对账。')
   lines.push('')
   lines.push('## 提示词清单')
@@ -662,12 +669,13 @@ async function loadSkills(root) {
 
 // ── HTTP 小工具 ─────────────────────────────────────────────────────────────
 
-function sendJson(res, status, payload) {
+function sendJson(res, status, payload, extraHeaders) {
   const body = JSON.stringify(payload)
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     'Content-Length': String(Buffer.byteLength(body)),
+    ...(extraHeaders || {}),
   })
   res.end(body)
 }
@@ -697,6 +705,81 @@ function query(url, key) {
   return params.get(key) || ''
 }
 
+/** 与 readBody 同一段逻辑，但回 Buffer —— raw 图片字节直传模式不能过 toString('utf8')。 */
+function readRaw(req, limit = 48 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    const chunks = []
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        reject(new Error('请求体过大'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks)))
+    req.on('error', reject)
+  })
+}
+
+/**
+ * 只读头部几十字节的图片宽高清道器（PNG / JPEG / GIF / WebP）。
+ * 目的只有一个：让宿主在 /dvp/grok/save 的**响应里**回带 width/height，
+ * 会话里的 agent 拿元信息就能确认"这张图确实取到了"，不必（也不许）把图片
+ * 内容读回上下文。解不出尺寸返回 0/0 —— 0 不代表失败，只代表这条通道不认这个封装。
+ */
+function imageSize(bytes) {
+  const out = { width: 0, height: 0 }
+  if (!Buffer.isBuffer(bytes) || bytes.length < 16) return out
+  // PNG: 8 字节签名 + 4 长度 + "IHDR" + BE width/height
+  if (bytes.readUInt32BE(0) === 0x89504e47 && bytes.toString('ascii', 12, 16) === 'IHDR') {
+    out.width = bytes.readUInt32BE(16)
+    out.height = bytes.readUInt32BE(20)
+    return out
+  }
+  // GIF: "GIF87a"/"GIF89a" + LE width/height
+  if (bytes.toString('ascii', 0, 6).startsWith('GIF8')) {
+    out.width = bytes.readUInt16LE(6)
+    out.height = bytes.readUInt16LE(8)
+    return out
+  }
+  // JPEG: 从 SOI 起扫 SOF0..SOF15（跳过 DHT/DAC/RST 等定长段）
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let off = 2
+    while (off + 9 < bytes.length) {
+      if (bytes[off] !== 0xff) { off += 1; continue }
+      const marker = bytes[off + 1]
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        out.height = bytes.readUInt16BE(off + 5)
+        out.width = bytes.readUInt16BE(off + 7)
+        return out
+      }
+      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { off += 2; continue }
+      off += 2 + bytes.readUInt16BE(off + 2)
+    }
+    return out
+  }
+  // WebP: RIFF....WEBP + VP8 / VP8L / VP8X 三种子头各有尺寸编码
+  if (bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') {
+    const tag = bytes.toString('ascii', 12, 16)
+    if (tag === 'VP8 ' && bytes.length >= 30) {
+      out.width = bytes.readUInt16LE(26) & 0x3fff
+      out.height = bytes.readUInt16LE(28) & 0x3fff
+    } else if (tag === 'VP8L' && bytes.length >= 25) {
+      const bits = bytes.readUInt32LE(21)
+      out.width = (bits & 0x3fff) + 1
+      out.height = ((bits >> 14) & 0x3fff) + 1
+    } else if (tag === 'VP8X' && bytes.length >= 30) {
+      out.width = 1 + (bytes[24] | (bytes[25] << 8) | (bytes[26] << 16))
+      out.height = 1 + (bytes[27] | (bytes[28] << 8) | (bytes[29] << 16))
+    }
+    return out
+  }
+  return out
+}
+
 const MIME = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -709,9 +792,9 @@ const MIME = {
 
 // ── 主入口 ──────────────────────────────────────────────────────────────────
 
-// 离线断言用的纯函数出口（tools/probe-host.mjs、tools/verify-*.mjs 直接 import 这两个，
+// 离线断言用的纯函数出口（tools/probe-host.mjs、tools/verify-*.mjs 直接 import 这些，
 // 不必起 HTTP 服务就能验"只提交一个字段不覆盖别的字段"与"历史追加去重"）。
-export { resolveRuntime, mergeRunHistory, RUN_HISTORY_LIMIT }
+export { resolveRuntime, mergeRunHistory, RUN_HISTORY_LIMIT, imageSize }
 
 export async function apply(ctx, rawConfig = {}) {
   const config = normalizeConfig(rawConfig)
@@ -1271,13 +1354,92 @@ export async function apply(ctx, rawConfig = {}) {
     kind: 'exact',
     path: '/dvp/grok/save',
     handler: async (req, res) => {
+      // 浏览器页面上下文与宿主之间的字节直传通道。响应体**只有元信息**
+      // （路径/字节数/哈希/宽高/状态），图片内容任何形态（含 base64）都不经会话文本：
+      // 1 MiB 图 ≈ 140 万字符 base64，既爆上下文又会被工具结果上限截坏。
+      // 所以这一条路由单独放开 CORS：
+      //   * 不放，页面内直传就永远读不回元信息，agent 只能把字节搬回会话来 POST —— 正是要防的绕行；
+      //   * 文件路径/账本本来就能被 GET /dvp/grok/plan 无鉴权读到，写入本来就能被 no-cors POST 触达，
+      //     ACAO:* 只是把"这一条响应的元信息"暴露给浏览器里已打开的页面，没有扩大能写的位置
+      //     （仍被批次目录围栏挡在 grok-output/<batchId>/ 里）。
+      const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS' }
       try {
-        if (req.method !== 'POST') {
-          sendJson(res, 405, { ok: false, error: '方法不允许' })
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204, {
+            ...cors,
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Max-Age': '600',
+            'Content-Length': '0',
+          })
+          res.end()
           return
         }
-        const body = JSON.parse(await readBody(req, 48 * 1024 * 1024))
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: '方法不允许' }, cors)
+          return
+        }
+        const contentType = String(req.headers['content-type'] || '').toLowerCase()
+        const isJson = contentType.includes('application/json')
         const root = grokRoot()
+        let body = {}
+        let bytes = null
+        let source = ''
+        if (isJson) {
+          // 旧口径：JSON { base64 | url }，保留给宿主侧工具与既有调用方。
+          // 会话里的首选已改成下面的 raw bytes —— 别再让 agent 拼 base64 JSON。
+          body = JSON.parse(await readBody(req, 48 * 1024 * 1024))
+          if (typeof body.base64 === 'string' && body.base64 !== '') {
+            bytes = Buffer.from(body.base64.replace(/^data:[^,]+,/, ''), 'base64')
+            source = 'inline-base64'
+          } else if (typeof body.url === 'string' && /^https?:\/\//i.test(body.url)) {
+            const response = await fetch(body.url)
+            if (!response.ok) {
+              sendJson(res, 502, { ok: false, error: '下载失败 HTTP ' + response.status }, cors)
+              return
+            }
+            bytes = Buffer.from(await response.arrayBuffer())
+            const responseContentType = response.headers.get('content-type') || ''
+            if (responseContentType.includes('webp')) body.ext = '.webp'
+            else if (responseContentType.includes('jpeg')) body.ext = '.jpg'
+            else if (responseContentType.includes('png')) body.ext = '.png'
+            source = body.url
+          } else {
+            sendJson(res, 400, { ok: false, error: '需要 base64 或 url；或把图片字节原样作请求体走 raw 模式（批次/序号/slug 放 URL 参数 ?batch=&index=&slug=）' }, cors)
+            return
+          }
+        } else {
+          // raw bytes 模式（首选）：请求体就是图片字节本身（页面内 fetch 成图的 arrayBuffer
+          // 原样 POST），标识走 URL 参数：/dvp/grok/save?batch=<batchId>&index=<序号>&slug=<slug>&ext=.jpg
+          // 字节全程 浏览器 → 宿主，不进会话文本。
+          body = {
+            batchId: query(req.url, 'batch'),
+            index: query(req.url, 'index'),
+            slug: query(req.url, 'slug'),
+            ext: query(req.url, 'ext'),
+            note: query(req.url, 'note'),
+          }
+          bytes = await readRaw(req, 48 * 1024 * 1024)
+          source = 'raw-bytes'
+          if (bytes.length === 0) {
+            sendJson(res, 400, { ok: false, error: '请求体为空：raw 模式要把图片字节原样放进请求体（生成中取到的占位图就是 0 字节，等流式收尾再取）' }, cors)
+            return
+          }
+          if (typeof body.ext !== 'string' || body.ext === '') {
+            if (contentType.includes('webp')) body.ext = '.webp'
+            else if (contentType.includes('jpeg') || contentType.includes('jpg')) body.ext = '.jpg'
+            else if (contentType.includes('png')) body.ext = '.png'
+            else if (contentType.includes('gif')) body.ext = '.gif'
+          }
+        }
+        if (source === 'inline-base64') {
+          const mimeMatch = /^data:([^;,]+)/.exec(body.base64)
+          if (mimeMatch) {
+            const mime = mimeMatch[1]
+            if (mime.includes('webp')) body.ext = '.webp'
+            else if (mime.includes('jpeg') || mime.includes('jpg')) body.ext = '.jpg'
+            else if (mime.includes('png')) body.ext = '.png'
+          }
+        }
         // 图的去处必须跟着批次走：传了 batchId 就进那一批；没传就进最新一批（没有批次才新建），
         // 绝不退回 grok-output 根目录 —— 那正是"新批次盖掉旧批次图"的老毛病。
         const wanted = wantBatch(body)
@@ -1287,7 +1449,7 @@ export async function apply(ctx, rawConfig = {}) {
             error: wanted.legacyAlias === true
               ? 'legacy 是旧版平铺布局的只读别名，不能写入；请传具体 batchId'
               : 'batchId 非法：只能是单个目录名（不含 / \\ : 与 ..）',
-          })
+          }, cors)
           return
         }
         let batchId = wanted.id === BATCH_ROOT ? '' : wanted.id
@@ -1297,7 +1459,7 @@ export async function apply(ctx, rawConfig = {}) {
           // 存图是"往已有批次里放结果"：批次得先存在。批次 ID 写错时宁可 404，
           // 也不要凭空建一个只有图片、没有 plan.json 的孤儿目录。
           if (!existsSync(dir)) {
-            sendJson(res, 404, { ok: false, error: '批次不存在：' + batchId + '（先用 /dvp/grok/plan 建批次）' })
+            sendJson(res, 404, { ok: false, error: '批次不存在：' + batchId + '（先用 /dvp/grok/plan 建批次）' }, cors)
             return
           }
         } else {
@@ -1313,40 +1475,17 @@ export async function apply(ctx, rawConfig = {}) {
           }
         }
         if (!allowAny(dir)) {
-          sendJson(res, 403, { ok: false, error: '批次目录越界' })
+          sendJson(res, 403, { ok: false, error: '批次目录越界' }, cors)
           return
         }
         await fsp.mkdir(dir, { recursive: true })
         const index = Number(body.index) || 1
         const slug = String(body.slug || 'prompt').replace(/[^A-Za-z0-9._\u4e00-\u9fa5-]+/g, '-').slice(0, 48) || 'prompt'
         let ext = typeof body.ext === 'string' && /^\.[a-z0-9]{2,5}$/i.test(body.ext) ? body.ext.toLowerCase() : '.png'
-        let bytes
-        if (typeof body.base64 === 'string' && body.base64 !== '') {
-          bytes = Buffer.from(body.base64.replace(/^data:[^,]+,/, ''), 'base64')
-          const mimeMatch = /^data:([^;,]+)/.exec(body.base64)
-          if (mimeMatch) {
-            const mime = mimeMatch[1]
-            if (mime.includes('webp')) ext = '.webp'
-            else if (mime.includes('jpeg') || mime.includes('jpg')) ext = '.jpg'
-            else if (mime.includes('png')) ext = '.png'
-          }
-        } else if (typeof body.url === 'string' && /^https?:\/\//i.test(body.url)) {
-          const response = await fetch(body.url)
-          if (!response.ok) {
-            sendJson(res, 502, { ok: false, error: '下载失败 HTTP ' + response.status })
-            return
-          }
-          bytes = Buffer.from(await response.arrayBuffer())
-          const contentType = response.headers.get('content-type') || ''
-          if (contentType.includes('webp')) ext = '.webp'
-          else if (contentType.includes('jpeg')) ext = '.jpg'
-          else if (contentType.includes('png')) ext = '.png'
-        } else {
-          sendJson(res, 400, { ok: false, error: '需要 base64 或 url' })
-          return
-        }
         const file = path.join(dir, String(index).padStart(2, '0') + '-' + slug + ext)
         await fsp.writeFile(file, bytes)
+        const sha256 = createHash('sha256').update(bytes).digest('hex')
+        const dims = imageSize(bytes)
         // 账本就写在批次目录里：一批一本账，条目里的 file 绝对路径直接指回本批产物，
         // 账本与产物不可能再分家（旧版账本在 grok-output 根下跨批次累加，才对不上）。
         const ledgerFile = path.join(dir, 'ledger.json')
@@ -1364,15 +1503,28 @@ export async function apply(ctx, rawConfig = {}) {
           slug,
           file,
           bytes: bytes.length,
-          source: typeof body.url === 'string' ? body.url : 'inline-base64',
+          sha256,
+          source,
           note: typeof body.note === 'string' ? body.note.slice(0, 300) : '',
         })
         ledger.updatedAt = new Date().toISOString()
         await fsp.writeFile(ledgerFile, JSON.stringify(ledger, null, 2), 'utf8')
         await touchGrokIndex(root, batchId)
-        sendJson(res, 200, { ok: true, batchId, file, bytes: bytes.length, dir, ledger: ledgerFile })
+        // 回给会话的全部家当就是这一小段元信息 —— 字节本身已经躺在盘上。
+        sendJson(res, 200, {
+          ok: true,
+          status: 'saved',
+          batchId,
+          file,
+          bytes: bytes.length,
+          sha256,
+          width: dims.width,
+          height: dims.height,
+          dir,
+          ledger: ledgerFile,
+        }, cors)
       } catch (err) {
-        sendJson(res, 500, { ok: false, error: String((err && err.message) || err) })
+        sendJson(res, 500, { ok: false, error: String((err && err.message) || err) }, cors)
       }
     },
   }))

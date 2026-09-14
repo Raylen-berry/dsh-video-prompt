@@ -247,7 +247,9 @@ node "<DSH 安装目录>/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --prof
    `<mediaRoot>/grok-output/<批次ID>/`（批次 ID = `年-月-日_时分-<素材名>`，同一分钟重复派发自动加 `-2`），
    `plan.json` + `driver.md` + 来源文本 + 成图 + `ledger.json` 全在这一个目录里；
    再把驱动请求写进输入框，由会话里的 agent 用浏览器插件驱动你的 Edge 打开 grok.com 出图，
-   每张图经 `/dvp/grok/save` 落盘（带 `batchId` 就进那一批，不带就进最新一批），最后用**本批的** `ledger.json` 对账。
+   每张图经 `/dvp/grok/save` 落盘（raw bytes 直传，带 `batch` 就进那一批，不带就进最新一批），
+   宿主只回 `{file,bytes,sha256,width,height,status}` 元信息 —— 图片字节不进会话文本；
+   最后用**本批的** `ledger.json` 对账。
    想重试某一批：把它的 `batchId` 回传给 `/dvp/grok/plan`（PUT/POST），写回同一目录，不新建。
    读回也一样：`GET /dvp/grok/plan` 不给参数 = 最新一批，`?batch=<批次ID>` = 指定批次。
 
@@ -278,7 +280,7 @@ node "<DSH 安装目录>/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --prof
 | `POST/PUT /dvp/grok/plan` + `batchId`（或 `batch`/`dir`） | 续做/重试这一批，写回同一目录 |
 | `GET /dvp/grok/plan` | 最新一批（`dir`/`plan` 字段名不变，另带 `batchId`/`batches`） |
 | `GET /dvp/grok/plan?batch=<id>` | 指定批次；`?batch=legacy` = 旧版平铺布局 |
-| `POST /dvp/grok/save` + `batchId` | 图落进那一批；不传则进最新一批 |
+| `POST /dvp/grok/save` + `batch`（raw bytes 请求体） | 图落进那一批；不传则进最新一批。响应只有元信息，字节不回吐 |
 | 旧布局 `<mediaRoot>/grok-output/plan.json` | 仍读得到（算一个历史批次），但**不再被写入** |
 
 拿不准批次时：`GET /dvp/grok/plan` 看 `batchId` 与 `batches`，拿 `batchId` 去和 `ledger.json` 对齐。
@@ -441,16 +443,36 @@ node tools/sync-servable.mjs    # 改完 client.js 后同步预览页那一份�
 所以：**取图必须发生在已登录的页面上下文里，且必须等到流式输出收尾**
 （`Stop model response` 消失 / 出现 `Download`·`Make video` 工具条）再去读，
 否则会拿到空壳。`tools/grok-shot.mjs` 的 `grokRecipe()` 已按这个结论写死步骤。
-`/dvp/grok/save` 同时支持 base64 与 URL，但**URL 那条路对 Grok 不可用**（403），留着是给别的图源。
-存图时**带上批次 ID**（`POST /dvp/grok/save` 的 `batchId`），图才会进它所属的那一批目录。
+存图时**带上批次 ID**（`POST /dvp/grok/save` 的 `batch` 查询参数，或 JSON 体的 `batchId`），
+图才会进它所属的那一批目录。
+
+`/dvp/grok/save` 现在有**两种请求体**：
+
+| 体 | 用途 | 谁在用 |
+| --- | --- | --- |
+| **raw bytes**（首选） | 请求体就是图片字节本身，`?batch=&index=&slug=&ext=` 走 URL 参数 | 会话里的 agent：页面上下文 `fetch` 成 `arrayBuffer` 后**原样 POST**，宿主回 `{ok,status:"saved",file,bytes,sha256,width,height}` |
+| JSON `{ base64 \| url }` | 兼容旧调用方与别的图源 | 宿主侧工具；**URL 那条路对 Grok 不可用**（403），留着是给别的图源 |
+
+**图片字节（含 base64）任何情况下不进会话文本**：1 MiB 图 ≈ 140 万字符 base64，既爆上下文，
+又会被工具结果上限在分块搬运时截坏（截到的 base64 落盘就是坏图，且账上记成功）。
+raw 直传下请求体里的 base64 字符数是 **0**，会话只收路径/字节数/sha256/宽高/状态
+（`tools/verify-grok-bytes.mjs` 就是这么量化的：同样一张 1 MiB 假图，旧路径会话文本 1,398,527 字符、
+其中 base64 1,398,444；新路径元信息 211 字符、其中 base64 **0**）。
+这一条路由因此单独放开了 CORS（`Access-Control-Allow-Origin: *`）——不放，页面内直传就永远读不回元信息，
+agent 只能把字节搬回会话里再 POST，正是要防的绕行。写入位置仍被批次目录围栏挡在 `grok-output/<batchId>/` 里。
 
 **取图的三条通道，按推荐顺序**：
 
 | 通道 | 怎么做 | 边界 |
 | --- | --- | --- |
-| ① 页面内读字节 | `fetch(url,{credentials:'include'})` → base64 → 交给 `/dvp/grok/save` | 需要宿主路由在；blob 要能回传 |
-| ② 浏览器磁盘缓存 | `node tools/scan-cache.mjs --bytes <体积> --out <目录> --name <文件名>` | 只对**已完整显示过**的图有效；体积撞车要验签名；缓存会被轮转，尽早取 |
-| ③ 用户点一次 Download | `node tools/watch-downloads.mjs --out <目录>` 接住并自动改名写账 | 需要人点；自动化附加模式下点按钮不落盘 |
+| ① 页面内读字节（首选） | `fetch(url,{credentials:'include'})` → `arrayBuffer` → **原样 POST** `/dvp/grok/save?batch=&index=&slug=`（raw bytes） | 需要宿主路由在；响应只回元信息，字节不进会话 |
+| ② 浏览器磁盘缓存 | `node tools/scan-cache.mjs --bytes <体积> --out <批次目录> --name <文件名>` | 只对**已完整显示过**的图有效；体积撞车要验签名；缓存会被轮转，尽早取 |
+| ③ 用户点一次 Download | `node tools/watch-downloads.mjs --out <批次目录>` 接住并自动改名写账 | 需要人点；自动化附加模式下点按钮不落盘 |
+
+②③ 都是**盘到盘**：字节从浏览器缓存/下载目录直接进批次目录，会话里只走路径 + 字节数 + sha256。
+旧版"宿主不可用就把 base64 按每 20k 字符分块交回会话再写盘"的兜底**已删除**（2026-09-15）；
+`tools/verify-grok-bytes.mjs` 里有一条断言盯着这个：配方文本中每处"分块"附近必须有禁止性措辞，
+否则算旧通道复活。
 
 ③ 的退出判据：从**最后一次成功收图**开始算空闲，默认连续空闲 20 秒才收工，且只在收过图之后
 才允许按空闲退出。收到图就把计时归零，所以"边投提示词边出图"的长批次不会被半路掐断

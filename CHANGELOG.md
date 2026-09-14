@@ -1,5 +1,45 @@
 # 变更记录
 
+## 未发布 — 图片字节彻底移出模型上下文（raw bytes 直传 /dvp/grok/save）
+
+**问题**：取图的兜底是"宿主不可用就把图 **base64 每 20k 字符分块**交回会话，再在会话里拼回去写盘"。
+1 MiB 的图 ⇒ 会话文本里 **1,398,444 字符 base64**：既爆上下文，又会被工具结果上限在分块搬运时截坏，
+截到的 base64 落盘就是坏图 —— 而账上照样记成功。
+
+**改法**（不重构链路，只换字节的运输方式）：
+
+1. `tools/grok-shot.mjs`：`grokRecipe()` 里那条分块兜底**删除**，改为「页面内 `fetch` → `arrayBuffer`
+   → **原样 POST** `<宿主基址>/dvp/grok/save?index=&slug=&batch=&ext=`（raw bytes）」，返回值只允许是
+   宿主回的那一小段元信息；兜底改成**盘到盘**通道（`scan-cache` 从浏览器缓存捞进本批目录，
+   或用户点一次 Download 后 `watch-downloads` 接住）。新增 `--batch <batchId>`：`plan.json` 与取图命令
+   一律指向 `<out>/<batchId>/`，不再退回平铺根目录。
+2. `index.js` 的 `/dvp/grok/save`：`Content-Type: application/octet-stream` 时把**请求体当图片字节**
+   （`readRaw()` 收 Buffer，上限 48 MiB），标识走 URL 参数；响应恒为
+   `{ok,status:"saved",batchId,file,bytes,sha256,width,height,dir,ledger}` —— 字节绝不回吐。
+   新增 `imageSize()`（PNG/JPEG/GIF/WebP 只读头几十字节，与脚本侧同一口径）与 CORS 头
+   （`Access-Control-Allow-Origin: *`：不放，页面内直传就读不回元信息，agent 只能把字节搬回会话 —— 正是要防的绕行；
+   写入仍被批次目录围栏挡在 `grok-output/<batchId>/` 里）。JSON `{base64|url}` 体保留给旧调用方与别的图源。
+   顺手导出 `driverDoc()`（纯函数）供离线断言。
+3. `client.js`（面板派发提示）、`client.js` 的 Grok 派发请求、`tools/backfill-plan.mjs` 的驱动清单：
+   措辞同步改为 raw bytes 直传 + 盘到盘兜底，并写明"图片内容/base64 一律不进会话文本"。
+4. `tools/run-all.mjs` 的 `SUITES` 登记新套件；`servable/client.js` 用 `tools/sync-servable.mjs` 同步。
+
+**数字**（同一张自造 1 MiB 假图，`tools/verify-grok-bytes.mjs` 量化）：
+
+| 口径 | 会话文本字符数 | 其中 base64 字符数 |
+| --- | --- | --- |
+| 旧（图 base64 进会话文本） | 1,398,527 | 1,398,444（= `ceil(bytes/3)*4`） |
+| 新（raw bytes 直传 + 元信息） | **211** | **0** |
+
+压掉 **99.9849%**。落盘对账从"回读图片内容"改为 `file/bytes/sha256/width/height/status`。
+
+**验证**：新增 `tools/verify-grok-bytes.mjs`（已登记进 `SUITES`）离线 **71 项检查全通过** ——
+假图自己捏（固定种子伪随机字节，不联网、不用真图、不碰真实媒体盘与浏览器），宿主用真 `node:http`
+监听 127.0.0.1 随机端口承托。反向验证：把同一份断言指向改动前的 `c3a8b4e`（临时 `git worktree`）
+**36 / 66 项失败**（raw 路由 500、响应无 `bytes/sha256/width/height`、配方仍写"每块 20k 字符"、
+`driverDoc` 未导出等），验证后已 `git worktree remove`。
+`npm test` **4/4 套件通过**（probe-host 187 + verify-watch-idle 18 + verify-grok-bytes 71 + selfcheck 237 = 513 项），退出码 0。
+
 ## 未发布 — CI 装测试依赖 + 恢复 selfcheck（react/react-dom 进 devDependencies，DSH_APP_DIR 指向仓库根）
 
 **问题（"本机全绿、干净机器/CI 全红"）**：`tools/selfcheck.mjs` 第 3e 节要"真 React 渲染成 HTML"，
