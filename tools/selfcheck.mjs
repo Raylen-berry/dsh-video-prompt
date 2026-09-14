@@ -366,6 +366,12 @@ ok('页脚有体积提示位（sizeHint）', /function sizeHint\(\)/.test(source
 ok('体积提示用与派发同一批构建器算预览', /var requestPreview = useMemo\(/.test(source) && /buildDispatchRequest\(items, sourceDir\(\), runsRoot, ''\)/.test(source))
 ok('token 只标估算（不装精确）', /token，估算/.test(source))
 ok('提示里写明正文只带路径与字数', /正文不进请求/.test(source))
+// v0.6.0：任务记录（人看的那份）—— 摘要表 + 点开按需拉产物文件
+ok('有任务记录区块与四列表头', /'data-dvp-runs': '1'/.test(source) && /时间 · 类型 · 项数 · 过程目录/.test(source))
+ok('产物文件是按需拉取的（点开那一行才请求 /dvp/runs/files）',
+  /function toggleRun\(run\)/.test(source) && /\/dvp\/runs\/files\?dir=/.test(source) && /if \(filesOf\[id\]\) return/.test(source))
+ok('给 AI 的历史走 format=md（最新一条展开）', /\/dvp\/runs\?format=md/.test(source) && /把历史写进输入框|复制给 AI/.test(source))
+ok('摘要一次拉完且带刷新入口', /function loadRuns\(\)/.test(source) && /onClick: loadRuns/.test(source))
 // v0.4.0：素材行不再显示文件大小（用户 2026-09-14：名称/大小/时间三样里，大小没人看还占宽）
 ok('素材行不再推入文件大小', !/item\.bytes\) dim\.push\(formatBytes/.test(source) && !/dim\.push\(formatBytes/.test(source))
 // v0.4.0：三列各有自己的色条（video/image/text），一眼分得开

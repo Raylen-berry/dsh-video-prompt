@@ -150,8 +150,8 @@ const host = await import(pathToFileURL(path.join(PKG, 'index.js')).href)
 
 console.log('\n1) apply() 挂在真 HTTP 服务上')
 await host.apply(fakeCtx, { mediaRoot: MEDIA, runsRoot: RUNS, registerSkills: true })
-ok('注册了 16 条路由', routes.length === 16, routes.map((r) => r.kind + ' ' + r.path))
-for (const expected of ['/dvp/scan', '/dvp/pick-dir', '/dvp/file', '/dvp/image', '/dvp/probe', '/dvp/state', '/dvp/manifest', '/dvp/run', '/dvp/process', '/dvp/source', '/dvp/grok/plan', '/dvp/grok/save', '/dvp/grok/run', '/dvp/grok/runs', '/dvp/skills/reload']) {
+ok('注册了 18 条路由', routes.length === 18, routes.map((r) => r.kind + ' ' + r.path))
+for (const expected of ['/dvp/scan', '/dvp/pick-dir', '/dvp/runs', '/dvp/runs/files', '/dvp/file', '/dvp/image', '/dvp/probe', '/dvp/state', '/dvp/manifest', '/dvp/run', '/dvp/process', '/dvp/source', '/dvp/grok/plan', '/dvp/grok/save', '/dvp/grok/run', '/dvp/grok/runs', '/dvp/skills/reload']) {
   ok('路由存在 ' + expected, routes.some((r) => r.path === expected), routes.map((r) => r.path))
 }
 
@@ -737,6 +737,36 @@ ok('保留的是最近若干条（最后一条是新提交的）', bigRuns.lengt
 ok('最早的那条按上限被挤掉', !bigRuns.some((r) => r.id === 'run-A'), bigRuns.map((r) => r.id).slice(0, 3))
 
 // ── 收尾 ────────────────────────────────────────────────────────────────────
+// ── 18) 派发历史：给人看的摘要顺序 + 给 agent 读的那份文本 ───────────────────
+console.log('\n18) /dvp/runs · 历史排序与「给 agent 读」的文本')
+{
+  const runs = [
+    { id: 'a', at: '2026-09-14T10:00:00.000Z', kind: 'prompt', count: 3, processDir: 'D:/runs/process/old' },
+    { id: 'c', at: '2026-09-14T12:00:00.000Z', kind: 'viral', count: 7, processDir: 'D:/runs/process/new', files: ['元素卡A.md', 'inventory.json'] },
+    { id: 'b', at: '2026-09-14T11:00:00.000Z', kind: 'copy', count: 2, processDir: 'D:/runs/process/mid' },
+  ]
+  const sorted = host.sortRuns(runs)
+  ok('sortRuns 最新在上', sorted.map((r) => r.id).join(',') === 'c,b,a', sorted.map((r) => r.id).join(','))
+  ok('sortRuns 不改动入参（纯函数）', runs.map((r) => r.id).join(',') === 'a,c,b')
+
+  const text = host.runsToAgentText(sorted, { mediaDir: 'D:/media', runsRoot: 'D:/runs' })
+  const iNew = text.indexOf('## 最近一次')
+  const iOld = text.indexOf('## 更早')
+  ok('给 agent 的文本：最新一条完整展开在最前', iNew > 0 && iOld > iNew, JSON.stringify({ iNew, iOld }))
+  ok('展开的那条带类型/项数/过程目录',
+    text.includes('类型：爆款分析') && text.includes('项数：7') && text.includes('D:/runs/process/new'))
+  ok('展开的那条把产物文件名直接列出来（agent 不必扫盘）', text.includes('元素卡A.md') && text.includes('inventory.json'))
+  ok('更早的压成一行一条', text.split('## 更早')[1].includes('生文案') && text.split('## 更早')[1].includes('生图'))
+  ok('写明不要重扫媒体盘（省一轮试探）', text.includes('重新扫媒体盘'))
+  ok('空历史不抛错且说清楚', host.runsToAgentText([]).includes('还没有派发记录'))
+
+  const files = host.listFilesSync(MEDIA)
+  ok('listFilesSync 只列文件（不含目录）', files.every((f) => f.name.indexOf('/') < 0 && f.name.indexOf('\\') < 0))
+  ok('listFilesSync 带 kind 与 bytes', files.every((f) => typeof f.bytes === 'number' && typeof f.kind === 'string'))
+  ok('listFilesSync 按 mtime 倒序', files.every((f, i) => i === 0 || files[i - 1].mtime >= f.mtime))
+  ok('listFilesSync 对不存在的目录返回空数组（不抛）', host.listFilesSync(path.join(MEDIA, 'nope-' + Date.now())).length === 0)
+}
+
 server.close()
 for (const extra of extraServers) extra.close()
 await fsp.rm(TMP, { recursive: true, force: true })

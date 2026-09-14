@@ -191,6 +191,18 @@ window.__ModuleLoader__.load({
       // 底下的内容被糊掉、抽屉自己的字清楚，同时壁纸仍然透得出来（保留玻璃观感）。
       '.dvp-drawer{position:absolute;inset:0;z-index:6;display:flex;flex-direction:column;gap:8px;padding:10px;box-sizing:border-box;overflow:hidden;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.28));border-radius:10px;background:var(--dsw-alias-bg-layer-2,rgba(45,37,55,.17));background-image:linear-gradient(var(--dsw-alias-bg-layer-2,rgba(45,37,55,.17)),var(--dsw-alias-bg-layer-2,rgba(45,37,55,.17)));backdrop-filter:blur(18px) saturate(120%);-webkit-backdrop-filter:blur(18px) saturate(120%);isolation:isolate;box-shadow:0 8px 24px rgba(0,0,0,.18)}',
       '.dvp-drawerHead{flex:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+      // 任务记录（v0.6.0）：一行一条摘要（时间 · 类型 · 项数 · 过程目录），点开才拉产物文件。
+      // 过程目录那一格用 direction:rtl —— 路径长了要截**前面**、留住尾部的目录名。
+      '.dvp-runs{display:flex;flex-direction:column;gap:2px;max-height:min(28vh,200px);overflow:auto}',
+      '.dvp-runRow{display:flex;align-items:center;gap:10px;padding:4px 6px;border-radius:7px;font-size:11.5px;cursor:pointer;color:var(--dsw-alias-label-secondary)}',
+      '.dvp-runRow:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.1))}',
+      '.dvp-runRow[data-open="1"]{color:var(--dsw-alias-label-primary)}',
+      '.dvp-runWhen,.dvp-runKind,.dvp-runCount,.dvp-runArrow{flex:none}',
+      '.dvp-runWhen{font-variant-numeric:tabular-nums}',
+      '.dvp-runDir{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}',
+      '.dvp-runFiles{display:flex;flex-direction:column;gap:3px;padding:4px 6px 6px 22px}',
+      '.dvp-runFile{display:flex;align-items:center;gap:8px;font-size:11px}',
+      '.dvp-runFile>span:first-child{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
       '.dvp-warn{font-size:11px;color:var(--dsw-alias-state-error-primary,#e5534b)}',
       '.dvp-ok{font-size:11px;color:var(--dsw-alias-state-success-primary,#2da44e)}',
       '.dvp-toast{position:fixed;z-index:80;bottom:26px;left:50%;transform:translateX(-50%);padding:9px 14px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));background:var(--dsw-alias-bg-module-platform,#fff);color:var(--dsw-alias-label-primary);font-size:12px;box-shadow:0 12px 32px rgba(0,0,0,.25)}',
@@ -800,6 +812,16 @@ window.__ModuleLoader__.load({
       var tabState = useState(typeof bootDraft.tab === 'string' && bootDraft.tab !== '' ? bootDraft.tab : 'image')
       var tab = tabState[0]
       var setTab = tabState[1]
+      // 任务记录（v0.6.0）：摘要列表 + 哪一行展开着 + 已拉到的产物文件（按需）
+      var runsState = useState([])
+      var runs = runsState[0]
+      var setRuns = runsState[1]
+      var openRunState = useState('')
+      var openRun = openRunState[0]
+      var setOpenRun = openRunState[1]
+      var filesState = useState({})
+      var filesOf = filesState[0]
+      var setFilesOf = filesState[1]
       // 生文案栏目的两个输入（书单 + 文案要求提示词），跟其它草稿一样只活在内存里
       var booksState = useState(typeof bootDraft.copyBooks === 'string' ? bootDraft.copyBooks : '')
       var copyBooks = booksState[0]
@@ -875,6 +897,7 @@ window.__ModuleLoader__.load({
             } else if (nextFolder) {
               void scan(nextFolder)
             }
+            loadRuns()   // 任务记录跟着面板打开就拉一次（摘要，便宜）
           } else if (res && res.error) {
             setError('宿主未就绪：' + res.error)
           }
@@ -1655,6 +1678,107 @@ window.__ModuleLoader__.load({
         )
       }
 
+      /** 任务记录（v0.6.0）：**人看**的那份 —— 时间 · 类型 · 项数 · 过程目录，点一行展开产物文件。
+       *  摘要一次拉完（便宜）；产物文件只有点开那一行才请求（按需加载，不把大目录塞进面板）。
+       *  另一份「给 agent 读」的在 /dvp/runs?format=md：最新一条完整展开、更早压成一行。 */
+      function loadRuns() {
+        var dir = data && data.dir ? data.dir : folder
+        void jsonFetch('/dvp/runs?path=' + encodeURIComponent(dir || '')).then(function (res) {
+          if (res && res.ok === true) setRuns(Array.isArray(res.runs) ? res.runs : [])
+        })
+      }
+      function toggleRun(run) {
+        var id = run.id || run.at
+        if (openRun === id) { setOpenRun(''); return }
+        setOpenRun(id)
+        if (filesOf[id]) return
+        void jsonFetch('/dvp/runs/files?dir=' + encodeURIComponent(run.processDir || '')).then(function (res) {
+          setFilesOf(function (prev) {
+            var next = Object.assign({}, prev)
+            next[id] = res && res.ok === true ? (res.files || []) : []
+            return next
+          })
+        })
+      }
+      /** 把历史按"给 agent 读"的形式取回来（最新一条展开、更早一行一条）。 */
+      function agentHistory(action) {
+        var dir = data && data.dir ? data.dir : folder
+        void jsonFetch('/dvp/runs?format=md&path=' + encodeURIComponent(dir || '')).then(function (res) {
+          var text = res && res.ok === true ? String(res.text || '') : ''
+          if (text === '') { setError('没读到派发历史'); return }
+          if (action === 'copy') {
+            void copyText(text).then(function (ok) { ok ? setNote('历史已复制（' + runs.length + ' 条）') : setError('复制失败，请手动选中复制') })
+            return
+          }
+          var result = dispatchToComposer('接着下面的派发历史继续做（不要重新扫媒体盘）：\n\n' + text)
+          if (result.ok) setNote('历史已写进输入框，按 Enter 发送')
+          else setError(result.reason + '（可改用「复制给 AI」再手动粘贴）')
+        })
+      }
+
+      function renderRuns() {
+        var kindLabel = function (k) { return k === 'viral' ? '爆款分析' : k === 'copy' ? '生文案' : k === 'grok' ? 'Grok 出图' : '生图' }
+        var when = function (at) {
+          var s = String(at || '')
+          if (s === '') return '—'
+          return s.replace('T', ' ').slice(5, 16)
+        }
+        return h('div', { className: 'dvp-sect', 'data-dvp-runs': '1' },
+          h('div', { className: 'dvp-sectHead' },
+            h('span', { className: 'dvp-sectTitle' }, '任务记录'),
+            h('span', { className: 'dvp-sub' }, '时间 · 类型 · 项数 · 过程目录（点一行看产物文件）'),
+            h('div', { style: { flex: '1' } }),
+            h('button', { className: 'dvp-btn', type: 'button', onClick: loadRuns, title: '重新读一遍派发历史' }, '刷新'),
+            h('button', { className: 'dvp-btn', type: 'button', onClick: function () { agentHistory('copy') }, title: '复制"给 agent 读"的那份历史（最新一条完整展开）' }, '复制给 AI'),
+            h('button', { className: 'dvp-btn', type: 'button', onClick: function () { agentHistory('send') }, title: '把历史写进输入框，接着上一批继续做' }, '接着做'),
+          ),
+          runs.length === 0
+            ? h('div', { className: 'dvp-sub' }, '还没有派发记录（每次点「准备…请求」都会记一条）')
+            : h('div', { className: 'dvp-runs' }, runs.slice(0, 20).map(function (run) {
+              var id = run.id || run.at
+              var open = openRun === id
+              var files = filesOf[id]
+              return h('div', { className: 'dvp-run', key: id },
+                h('div', {
+                  className: 'dvp-runRow',
+                  'data-open': open ? '1' : '0',
+                  title: run.processDir || '（这条没记过程目录）',
+                  onClick: function () { toggleRun(run) },
+                },
+                  h('span', { className: 'dvp-runWhen' }, when(run.at)),
+                  h('span', { className: 'dvp-runKind' }, kindLabel(run.kind)),
+                  h('span', { className: 'dvp-runCount' }, (Number(run.count) || 0) + ' 项'),
+                  h('span', { className: 'dvp-runDir' }, run.processDir ? String(run.processDir).slice(-46) : '（无过程目录）'),
+                  h('span', { className: 'dvp-runArrow' }, open ? '▾' : '▸'),
+                ),
+                open
+                  ? h('div', { className: 'dvp-runFiles' },
+                    files === undefined
+                      ? h('span', { className: 'dvp-sub' }, '读取中…')
+                      : files.length === 0
+                        ? h('span', { className: 'dvp-sub' }, '这个目录里没有文件（或读不到）：' + (run.processDir || ''))
+                        : files.map(function (f) {
+                          return h('div', { className: 'dvp-runFile', key: f.name },
+                            h('span', null, f.name),
+                            h('span', { className: 'dvp-sub' }, (f.kind === 'image' ? '图 ' : f.kind === 'video' ? '视频 ' : f.kind === 'text' ? '文本 ' : '') + formatBytes(f.bytes)),
+                            h('button', {
+                              className: 'dvp-btn',
+                              type: 'button',
+                              onClick: function (event) {
+                                event.stopPropagation()
+                                void copyText(run.processDir + '\\' + f.name).then(function (ok) { ok ? setNote('路径已复制：' + f.name) : setError('复制失败') })
+                              },
+                            }, '复制路径'),
+                          )
+                        }),
+                    run.processDir ? h('button', { className: 'dvp-btn', type: 'button', onClick: function (event) { event.stopPropagation(); void copyText(run.processDir).then(function (ok) { ok ? setNote('过程目录已复制') : setError('复制失败') }) } }, '复制目录') : null,
+                  )
+                  : null,
+              )
+            })),
+        )
+      }
+
       /** 大纲那一行：位置固定在中段下方，只负责开合抽屉。 */
       function renderHowtoHead() {
         return h('div', { className: 'dvp-sect dvp-howto', 'data-dvp-howto-open': howtoOpen ? '1' : '0' },
@@ -1840,6 +1964,8 @@ window.__ModuleLoader__.load({
           ),
           sourcePath ? h('div', { className: 'dvp-sub' }, '已落盘：' + sourcePath + (sourceChars ? '（' + sourceChars + ' 字）· 请求里只带路径与字数' : '')) : null,
         ),
+
+        isCopy ? null : renderRuns(),
 
         isCopy ? null : renderHowtoHead(),
 

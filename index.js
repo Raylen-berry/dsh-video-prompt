@@ -1181,6 +1181,76 @@ async function writeManifest(dir, data) {
   return data
 }
 
+// ── 派发历史（v0.6.0）：给人看的表格 + 给 agent 读的一段文本 ──────────────────
+/** 历史按时间倒序（最新在上）。人看与 agent 读都用这个顺序。 */
+export function sortRuns(runs) {
+  return (Array.isArray(runs) ? runs : []).slice()
+    .sort((a, b) => String((b && b.at) || '').localeCompare(String((a && a.at) || '')))
+}
+
+const FILE_KIND = (name) => {
+  const ext = String(name).slice(String(name).lastIndexOf('.') + 1).toLowerCase()
+  if (['md', 'txt', 'json', 'csv', 'srt', 'yaml', 'yml'].includes(ext)) return 'text'
+  if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'].includes(ext)) return 'image'
+  if (['mp4', 'mov', 'mkv', 'webm', 'avi'].includes(ext)) return 'video'
+  return 'other'
+}
+
+/** 列一层产物文件（不递归）：产物都在过程目录/批次目录的顶层。 */
+export function listFilesSync(dir) {
+  const out = []
+  let names = []
+  try { names = readdirSync(dir) } catch { return out }
+  for (const name of names) {
+    try {
+      const st = statSync(path.join(dir, name))
+      if (!st.isFile()) continue
+      out.push({ name, bytes: st.size, mtime: st.mtimeMs, kind: FILE_KIND(name) })
+    } catch { /* 单个文件读不到就跳过 */ }
+  }
+  return out.sort((a, b) => b.mtime - a.mtime)
+}
+
+/**
+ * 给 **agent 读**的历史文本（v0.6.0）。排序刻意不按时间平铺：
+ *   ① 最新一条**完整展开**（agent 十有八九是接着上一批做），更早的压成一行 —— 读起来便宜；
+ *   ② 路径一律绝对路径，并把**产物文件名直接列出来**，agent 不必再扫磁盘猜产物叫什么；
+ *   ③ 开头两句把"该读哪里、别重扫媒体盘"说死，省掉一轮试探。
+ * 人看的是前端表格（时间 · 类型 · 项数 · 过程目录，点开看产物）—— 两者同一份数据、两种读法。
+ */
+export function runsToAgentText(runs, ctx = {}) {
+  const list = sortRuns(runs)
+  const kindLabel = (k) => (k === 'viral' ? '爆款分析' : k === 'copy' ? '生文案' : k === 'grok' ? 'Grok 出图' : '生图')
+  const lines = []
+  lines.push('# 派发历史（最新在上，共 ' + list.length + ' 条）')
+  if (ctx.mediaDir) lines.push('- 媒体目录：' + ctx.mediaDir)
+  if (ctx.runsRoot) lines.push('- 产物目录：' + ctx.runsRoot)
+  lines.push('- 读法：要续跑/续写就顺着下面的绝对路径读；**不要**重新扫媒体盘，也不要在回复里复述这些路径。')
+  if (list.length === 0) {
+    lines.push('- （还没有派发记录）')
+    return lines.join('\n')
+  }
+  const newest = list[0]
+  const at = (r) => String((r && r.at) || '').replace('T', ' ').slice(0, 16)
+  lines.push('')
+  lines.push('## 最近一次（从这里接）')
+  lines.push('- 时间：' + at(newest))
+  lines.push('- 类型：' + kindLabel(newest.kind))
+  lines.push('- 项数：' + (Number(newest.count) || 0))
+  if (newest.processDir) lines.push('- 过程目录：' + newest.processDir)
+  if (newest.batchId) lines.push('- 批次 ID：' + newest.batchId)
+  if (Array.isArray(newest.files) && newest.files.length > 0) lines.push('- 已产出：' + newest.files.join('、'))
+  else lines.push('- 已产出：（这条没记下产物清单 —— 需要时自己列一下过程目录）')
+  if (list.length > 1) {
+    lines.push('')
+    lines.push('## 更早（一行一条，时间 · 类型 · 项数 · 过程目录）')
+    for (const r of list.slice(1)) {
+      lines.push('- ' + at(r) + ' · ' + kindLabel(r.kind) + ' · ' + (Number(r.count) || 0) + ' 项' + (r.processDir ? ' · ' + r.processDir : ''))
+    }
+  }
+  return lines.join('\n')
+}
+
 // ── 技能注册 ────────────────────────────────────────────────────────────────
 
 /**
@@ -1476,6 +1546,72 @@ export async function apply(ctx, rawConfig = {}) {
         // browse 后端（远程/无头宿主）：能力词汇是"在应用内列举与创建"，不是 OS 对话框。
         // 本插件前端还没接那套浏览 UI，如实说明，别让用户以为是弹框失败。
         sendJson(res, 200, { ok: false, error: 'browse-only', message: '这个宿主的目录选择是应用内浏览式：请手填路径' })
+      } catch (err) {
+        sendJson(res, 500, { ok: false, error: String((err && err.message) || err) })
+      }
+    },
+  }))
+
+  // ---- ①c 派发历史（v0.6.0）----
+  // 人看：/dvp/runs 返回**摘要**（时间 · 类型 · 项数 · 过程目录），前端渲染成表、点开才拉文件。
+  // agent 读：/dvp/runs?format=md 返回 runsToAgentText() 那段（最新一条展开 + 更早压成一行）。
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/dvp/runs',
+    handler: async (req, res) => {
+      try {
+        const dir = path.resolve(query(req.url, 'path') || mediaRoot())
+        if (!allowAny(dir)) {
+          sendJson(res, 403, { ok: false, error: '目录不在允许的根目录内', dir })
+          return
+        }
+        const manifest = await readManifest(dir)
+        const runs = sortRuns(manifest.runs)
+        if (query(req.url, 'format') === 'md') {
+          // 给 agent 的那份要能直接动手：把最新一条的产物文件名列出来（只读一层，读不到就略过）
+          const newest = runs[0]
+          if (newest && newest.processDir) {
+            const target = path.resolve(String(newest.processDir))
+            if (allowAny(target) && existsSync(target)) newest.files = listFilesSync(target).map((f) => f.name)
+          }
+          sendJson(res, 200, { ok: true, dir, count: runs.length, text: runsToAgentText(runs, { mediaDir: dir, runsRoot: runsRoot() }) })
+          return
+        }
+        sendJson(res, 200, {
+          ok: true,
+          dir,
+          runs: runs.map((r) => ({
+            id: r.id || '',
+            at: r.at || '',
+            kind: r.kind || '',
+            count: Number(r.count) || 0,
+            processDir: r.processDir || '',
+            batchId: r.batchId || '',
+          })),
+        })
+      } catch (err) {
+        sendJson(res, 500, { ok: false, error: String((err && err.message) || err) })
+      }
+    },
+  }))
+
+  // 按需拉某次派发的产物文件（点开某一行时才请求；不递归、只读一层）
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/dvp/runs/files',
+    handler: async (req, res) => {
+      try {
+        const raw = query(req.url, 'dir')
+        const target = raw === '' ? '' : path.resolve(raw)
+        if (target === '' || !allowAny(target)) {
+          sendJson(res, 403, { ok: false, error: '目录不在允许的根目录内', dir: target })
+          return
+        }
+        if (!existsSync(target)) {
+          sendJson(res, 404, { ok: false, error: '目录不存在', dir: target })
+          return
+        }
+        sendJson(res, 200, { ok: true, dir: target, files: listFilesSync(target) })
       } catch (err) {
         sendJson(res, 500, { ok: false, error: String((err && err.message) || err) })
       }
