@@ -1,5 +1,87 @@
 # 变更记录
 
+## 未发布 — 修 P2 批次：请求载荷、运行期目录、局部保存、派发历史、收图退出
+
+一轮只读审计报了 5 条缺陷，**逐条先核实**（读代码 + 最小复现）再改。5 条全部成立，
+都不是重构；每条都有离线断言，并且都用"把新断言指向改动前的实现"取了反向证据。
+
+### ① 正文落盘后仍被全文塞进派发请求（请求载荷瘦身）
+
+**核实**：`client.js` 的 `buildGrokRequest()` 把 `source` 当字符串直接拼进请求正文块，
+哨兵材料（32,399 字符）实测生成的派发请求 **33,536 字符**；面板上却写着"正文不进对话框"。
+
+**改法**：`source` 改成**材料引用** `{ id, path, chars }`，请求里只给材料 ID / 文件路径 / 字数，
+并明确要求 agent **按需读取**（先读文件头与目录，按图片数挑最强的 N 个情节，只把那几段读全，
+不要整篇搬进上下文、不要在回复里复述正文）。面板侧：勾了「按来源文本生图」但还没落盘时，
+派发前先自动 `POST /dvp/source` 落盘拿路径；落盘失败就取消这次派发（不生成读不到材料的请求）。
+
+| 口径 | 派发请求字符数 | 说明 |
+| --- | --- | --- |
+| 旧（正文拼进请求） | 33,536 | 与用户实测的 30,642 字符同一形态 |
+| 新（只带材料引用） | **1,286** | 压掉 **96.2%**；含材料 ID + 路径 + 字数 + 读取要求 |
+
+顺手兜一道：万一有调用方把整块正文当"路径"传进来（老签名的形态），只认第一行当路径，
+正文剩余部分仍不进请求 —— 挡住"漏改一处就把正文拼回去"。
+
+### ② 保存新目录后任务仍写旧目录
+
+**核实**：`apply()` 里 `mediaRoot` / `runsRoot` 是启动时解析一次的常量，`/dvp/state` 只把新根
+推进允许围栏，写盘的那些路由仍打旧目录（`/dvp/source`、`/dvp/process`、`/dvp/run`、
+`/dvp/grok/plan` 全都写老地方）。
+
+**改法**：改为**可变运行期配置** `runtime`，各路由读 `runtime.mediaRoot` / `runtime.runsRoot`；
+`/dvp/state` 保存成功后同步刷新，响应回带 `effective: { mediaRoot, runsRoot }`（当前实际生效路径）。
+
+### ③ 局部保存设置会丢掉未提交字段
+
+**核实**：写盘写成 `typeof patch.mediaRoot === 'string' ? … : undefined`，而 `writeState()` 是浅合并
+（`{...current, ...patch}`）—— `undefined` 会盖掉现值。面板切「路径」下拉时只提交 `{ pipelineMode }`，
+于是 `state.json` 里 `mediaRoot` / `runsRoot` 一起消失（实测确认）。
+
+**改法**：用 `'key' in patch` 区分"没提交该字段"与"明确清空"。
+没提交 = 保留现值；`null` / 空串 = 明确清空（从 `state.json` 删键，运行期回落到 config 给的根）。
+
+### ④ 新派发覆盖旧派发历史
+
+**核实**：面板每次只提交最新一条 `run`，宿主 `const runs = body.runs` 直接覆盖 —— 历史里只剩最后一次。
+
+**改法**：`mergeRunHistory()` 按任务 ID 追加去重，保留最近 `RUN_HISTORY_LIMIT = 30` 条；
+去重优先 `run.id`，旧记录退到 `at|kind|processDir` 指纹；面板提交时补上 `run.id`，响应回带 `runCount`。
+
+### ⑤ 持续下载时接收脚本仍提前退出
+
+**核实**：`idleRounds` 自增但**收到图也不重置**，`received > 0 && idleRounds >= 4` 让第 5 轮必定退出。
+实测旧逻辑：每轮都有新图时在第 5 轮（30 秒）收工，只收到 5 张。
+
+**改法**：改按"**最后一次成功收图**的时间戳"算空闲（默认 20 秒），收到图就归零；
+且只在收过图之后才允许按空闲退出。脚本主体抽成可 import 的 `watchDownloads()`（可注入 `clock` / `sleep`），
+CLI 行为不变（`--minutes` / `--src` / `--out` 照旧）。
+
+### 反向证据（新断言指向改动前的实现，确认必挂）
+
+在临时 `git worktree`（`8755bec`）里跑同一批断言：
+
+| 套件 | 改动前 | 改动后 |
+| --- | --- | --- |
+| `tools/selfcheck.mjs` | 7 / 237 失败 | **0 / 237** |
+| `tools/probe-host.mjs` | 16 / 187 失败 | **0 / 187** |
+| 收图退出断言（旧主线适配版） | 4 / 7 失败（每轮有图仍在第 5 轮退出、只收到 5 张） | **0 / 18** |
+
+失败项与上面 5 条一一对应（逐段状态被 undefined 覆盖、新目录不生效、历史只剩最后一条、
+每轮有图仍提前退出……）。工作树跑完已删除。
+
+### 改动文件
+
+- `client.js` + `servable/client.js`：请求只带材料引用；派发前自动落盘来源文本；
+  运行历史补 `run.id`；面板文案（"请求里只带路径与字数"）
+- `index.js`：`runtime` 可变根 + `/dvp/state` 同步刷新并回传 `effective`；局部保存语义；
+  `mergeRunHistory()`（上限 30）；`writeState()` 处理明确清空；导出 `resolveRuntime` / `mergeRunHistory`
+- `tools/watch-downloads.mjs`：空闲判据改用"最后一次收图时间"；导出 `watchDownloads`
+- `tools/selfcheck.mjs`（新增 3d2 哨兵载荷段）、`tools/probe-host.mjs`（新增 13/14/15 段）、
+  `tools/verify-watch-idle.mjs`（新增，18 项）
+- `README.md`：来源文本、产物目录即时生效、派发历史上限、收图退出判据同步
+- `.gitignore`：忽略断言脚本的临时目录
+
 ## 未发布 — 修 P1：Grok 批次共用一个目录，新批次覆盖旧批次
 
 **问题**：`grok-output` 是**固定目录**，每个批次的 `plan.json`、`driver.md`、`source-*.md`

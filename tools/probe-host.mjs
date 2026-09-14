@@ -648,11 +648,12 @@ const cleared = await (await fetch(BASE + '/dvp/state', {
 })).json()
 ok('null 是"明确清空"，不是字面量写进 state', cleared.state.runsRoot === undefined, cleared.state)
 ok('清空后运行期回落到 config 给的根（不是字面 null、也不动另一个根）',
-  cleared.effective.runsRoot === RUNS && cleared.effective.mediaRoot === MEDIA, cleared.effective)
+  cleared.effective !== undefined && cleared.effective.runsRoot === RUNS && cleared.effective.mediaRoot === MEDIA, cleared.effective)
 const restored = await (await fetch(BASE + '/dvp/state', {
   method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mediaRoot: MEDIA, runsRoot: RUNS }),
 })).json()
-ok('重新写回目录成功（后续段落继续用临时目录）', restored.effective.mediaRoot === MEDIA && restored.effective.runsRoot === RUNS, restored.effective)
+ok('重新写回目录成功（后续段落继续用临时目录）',
+  restored.effective !== undefined && restored.effective.mediaRoot === MEDIA && restored.effective.runsRoot === RUNS, restored.effective)
 
 // ── 14. 保存新目录后，后续保存真的落新目录 ──────────────────────────────────
 // 运行时路径原来只在 apply() 里解析一次，于是"保存新产物目录"成功后，写盘的每条路由
@@ -666,27 +667,29 @@ const moved = await (await fetch(BASE + '/dvp/state', {
   method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mediaRoot: NEW_MEDIA, runsRoot: NEW_RUNS }),
 })).json()
 ok('保存返回当前实际生效路径', moved.ok === true && moved.effective && moved.effective.mediaRoot === NEW_MEDIA && moved.effective.runsRoot === NEW_RUNS, moved.effective)
+// 落点判断一律走这个助手：字段缺失时要判失败，不是抛错（断言脚本自己崩了就没法归因）
+const under = (value, root) => typeof value === 'string' && value.startsWith(root + path.sep)
 const movedSource = await (await fetch(BASE + '/dvp/source', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: '# 新目录章纲\n1. 换盘\n', label: 'moved-book' }),
 })).json()
 ok('保存新目录后，来源文本落进新目录（不是旧目录）',
-  movedSource.ok === true && movedSource.file.startsWith(NEW_RUNS + path.sep) && existsSync(movedSource.file),
+  movedSource.ok === true && under(movedSource.file, NEW_RUNS) && existsSync(String(movedSource.file)),
   { file: movedSource.file, want: NEW_RUNS })
 const movedProc = await (await fetch(BASE + '/dvp/process', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slug: 'moved', mode: 'prompt' }),
 })).json()
-ok('过程目录也落新目录', movedProc.ok === true && movedProc.dir.startsWith(NEW_RUNS + path.sep), movedProc.dir)
+ok('过程目录也落新目录', movedProc.ok === true && under(movedProc.dir, NEW_RUNS), movedProc.dir)
 const movedRun = await (await fetch(BASE + '/dvp/run', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slug: 'moved', optimizedPrompt: '# 新目录\n' }),
 })).json()
-ok('运行目录也落新目录', movedRun.ok === true && movedRun.runDir.startsWith(NEW_RUNS + path.sep), movedRun.runDir)
+ok('运行目录也落新目录', movedRun.ok === true && under(movedRun.runDir, NEW_RUNS), movedRun.runDir)
 const movedScan = await (await fetch(BASE + '/dvp/scan?path=' + encodeURIComponent(NEW_MEDIA))).json()
 ok('新媒体目录立即可用（围栏跟着刷新）', movedScan.ok === true, movedScan)
 const movedGrok = await (await fetch(BASE + '/dvp/grok/plan', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ slug: 'moved-batch', entries: [{ index: 1, title: 'x', slug: 'x', prompt: 'y' }] }),
 })).json()
-ok('Grok 批次也落新媒体目录', movedGrok.ok === true && movedGrok.dir.startsWith(path.join(NEW_MEDIA, 'grok-output') + path.sep), movedGrok.dir)
+ok('Grok 批次也落新媒体目录', movedGrok.ok === true && under(movedGrok.dir, path.join(NEW_MEDIA, 'grok-output')), movedGrok.dir)
 // 收尾：把运行配置还原到主链路用的临时目录（后面 12 段的热重扫还在用）
 await fetch(BASE + '/dvp/state', {
   method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mediaRoot: MEDIA, runsRoot: RUNS }),
@@ -704,24 +707,26 @@ const runA = { id: 'run-A', at: '2026-09-14T10:00:00.000Z', kind: 'dispatch', co
 const runB = { id: 'run-B', at: '2026-09-14T10:05:00.000Z', kind: 'dispatch', count: 3, processDir: path.join(RUNS, 'process', 'b') }
 await putRun(runA)
 const histB = await putRun(runB)
-ok('A 之后提交 B：两条都在', Array.isArray(histB.read.runs) && histB.read.runs.length === 2, histB.read.runs)
-ok('顺序正确（先 A 后 B）', histB.read.runs[0].id === 'run-A' && histB.read.runs[1].id === 'run-B', histB.read.runs.map((r) => r.id))
+const runsOf = (payload) => (Array.isArray(payload.runs) ? payload.runs : [])
+ok('A 之后提交 B：两条都在', runsOf(histB.read).length === 2, histB.read.runs)
+ok('顺序正确（先 A 后 B）', runsOf(histB.read).length === 2 && runsOf(histB.read)[0].id === 'run-A' && runsOf(histB.read)[1].id === 'run-B', runsOf(histB.read).map((r) => r.id))
 ok('响应里带回条数便于核对', histB.runCount === 2, histB.runCount)
 const histAgain = await putRun(runB)
-ok('重复提交同 ID 不产生第二条', histAgain.read.runs.length === 2 && histAgain.read.runs[1].id === 'run-B', histAgain.read.runs.map((r) => r.id))
+ok('重复提交同 ID 不产生第二条', runsOf(histAgain.read).length === 2 && runsOf(histAgain.read)[1].id === 'run-B', runsOf(histAgain.read).map((r) => r.id))
 // 旧调用方（没有 id）：退到 at|kind|processDir 指纹去重
 const legacyRun = { at: '2026-09-14T10:10:00.000Z', kind: 'dispatch', count: 1, processDir: path.join(RUNS, 'process', 'c') }
 await putRun(legacyRun)
 const histLegacy = await putRun(legacyRun)
-ok('没有 id 的旧记录按指纹去重', histLegacy.read.runs.length === 3, histLegacy.read.runs.map((r) => r.id || r.at))
+ok('没有 id 的旧记录按指纹去重', runsOf(histLegacy.read).length === 3, runsOf(histLegacy.read).map((r) => r.id || r.at))
 // 上限：并发写会互相盖，所以这里串行提交 34 条
 for (let i = 0; i < 34; i += 1) {
   await putRun({ id: 'run-N' + i, at: '2026-09-14T11:00:00.000Z', kind: 'dispatch', count: i, processDir: path.join(RUNS, 'process', 'n' + i) })
 }
 const histBig = await (await fetch(BASE + '/dvp/manifest?dir=' + encodeURIComponent(HIST_DIR))).json()
-ok('历史有上限（30 条）', histBig.runs.length === 30, histBig.runs.length)
-ok('保留的是最近若干条（最后一条是新提交的）', histBig.runs[histBig.runs.length - 1].id === 'run-N33', histBig.runs[histBig.runs.length - 1])
-ok('最早的那条按上限被挤掉', !histBig.runs.some((r) => r.id === 'run-A'), histBig.runs.map((r) => r.id).slice(0, 3))
+const bigRuns = runsOf(histBig)
+ok('历史有上限（30 条）', bigRuns.length === 30, bigRuns.length)
+ok('保留的是最近若干条（最后一条是新提交的）', bigRuns.length > 0 && bigRuns[bigRuns.length - 1].id === 'run-N33', bigRuns[bigRuns.length - 1])
+ok('最早的那条按上限被挤掉', !bigRuns.some((r) => r.id === 'run-A'), bigRuns.map((r) => r.id).slice(0, 3))
 
 // ── 收尾 ────────────────────────────────────────────────────────────────────
 server.close()
