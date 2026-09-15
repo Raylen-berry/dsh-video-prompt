@@ -205,7 +205,7 @@ window.__ModuleLoader__.load({
       '.dvp-runFile>span:first-child{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
       '.dvp-warn{font-size:11px;color:var(--dsw-alias-state-error-primary,#e5534b)}',
       '.dvp-ok{font-size:11px;color:var(--dsw-alias-state-success-primary,#2da44e)}',
-      '.dvp-toast{position:fixed;z-index:80;bottom:26px;left:50%;transform:translateX(-50%);padding:9px 14px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));background:var(--dsw-alias-bg-module-platform,#fff);color:var(--dsw-alias-label-primary);font-size:12px;box-shadow:0 12px 32px rgba(0,0,0,.25)}',
+      '.dvp-toast{position:fixed;z-index:2147483430;bottom:26px;left:50%;transform:translateX(-50%);padding:9px 14px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));background:var(--dsw-alias-bg-module-platform,#fff);color:var(--dsw-alias-label-primary);font-size:12px;box-shadow:0 12px 32px rgba(0,0,0,.25)}',
       '@media (max-width:820px){.dvp-cols{grid-template-columns:1fr}.dvp-panel{width:calc(100vw - 32px)}}',
     ].join('\n')
 
