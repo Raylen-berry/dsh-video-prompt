@@ -101,6 +101,22 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 const PORT = server.address().port
 const BASE = 'http://127.0.0.1:' + PORT
 
+// v0.6.3 契约回归：宿主 native 后端的 capability().pick(signal) 第一句就读 signal.aborted，
+// 调用方漏传 signal ⇒ 500 "Cannot read properties of undefined (reading 'aborted')"、弹框根本不出现。
+// 这里刻意要求 signal 是 AbortSignal，缺了就抛 —— 把那条真实崩溃钉成测试。
+const pickerCalls = []
+const fakePicker = {
+  capability() {
+    return {
+      kind: 'native',
+      pick: async (signal) => {
+        if (!(signal instanceof AbortSignal)) throw new TypeError("Cannot read properties of undefined (reading 'aborted')")
+        pickerCalls.push(signal)
+        return MEDIA // 假装用户选了媒体根目录
+      },
+    }
+  },
+}
 const skillRegistrations = []
 const fakeSkills = {
   register(skill) {
@@ -129,6 +145,7 @@ const fakeCtx = {
         },
       }
     }
+    if (key === 'directoryPicker') return fakePicker
     if (key === 'skills') return fakeSkills
     return undefined
   },
@@ -160,6 +177,11 @@ ok('注册了 18 条路由', routes.length === 18, routes.map((r) => r.kind + ' 
 for (const expected of ['/dvp/scan', '/dvp/pick-dir', '/dvp/runs', '/dvp/runs/files', '/dvp/file', '/dvp/image', '/dvp/probe', '/dvp/state', '/dvp/manifest', '/dvp/run', '/dvp/process', '/dvp/source', '/dvp/grok/plan', '/dvp/grok/save', '/dvp/grok/run', '/dvp/grok/runs', '/dvp/skills/reload']) {
   ok('路由存在 ' + expected, routes.some((r) => r.path === expected), routes.map((r) => r.path))
 }
+
+// pick-dir 行为面（v0.6.3）：必须把 AbortSignal 传给宿主 pick()，且取消/选择都能如实回
+const pickedDir = await (await fetch(BASE + '/dvp/pick-dir')).json()
+ok('/dvp/pick-dir 带 signal 调宿主 pick()（不再 500 aborted）', pickedDir.ok === true && pickedDir.dir === MEDIA, pickedDir)
+ok('pick() 收到的确实是 AbortSignal', pickerCalls.length === 1 && pickerCalls[0] instanceof AbortSignal, pickerCalls.length)
 
 // 另起一个独立宿主实例（自己的 state.json / mediaRoot），用来验"盘上只有旧布局"这类
 // 换一个 mediaRoot 才说得清的场景。同一个 index.js 模块被 apply 两次是安全的：

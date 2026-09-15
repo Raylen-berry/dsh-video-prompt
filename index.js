@@ -1548,7 +1548,11 @@ export async function apply(ctx, rawConfig = {}) {
         }
         const cap = picker.capability()
         if (cap && cap.kind === 'native') {
-          const dir = await cap.pick()
+          // 契约是 `pick(signal)`：宿主内部第一句就读 signal.aborted（取消对话框靠它）。
+          // 不传 ⇒ 500 "Cannot read properties of undefined (reading 'aborted')"，
+          // 弹框根本没出现过 —— 2026-09-15 实测踩过。AbortSignal.timeout 兜个上限：
+          // 人一直晾着对话框不至于让这条请求永远挂着。
+          const dir = await cap.pick(AbortSignal.timeout(5 * 60 * 1000))
           sendJson(res, 200, { ok: true, dir: typeof dir === 'string' ? dir : '', canceled: typeof dir !== 'string' })
           return
         }
