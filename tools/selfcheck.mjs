@@ -379,8 +379,11 @@ ok('三列带 data-kind 区分', /'data-kind': kind/.test(source) && /\.dvp-col\
   && /\.dvp-col\[data-kind=image\]/.test(source) && /\.dvp-col\[data-kind=text\]/.test(source))
 // v0.4.0：抽屉必须自己保证**读得清** —— 开壁纸时主题的 --dsw-alias-bg-* 全是半透明玻璃
 // （实测本机 0.05–0.17），只调颜色 alpha 没用，得靠 backdrop 模糊把底下的素材文字糊掉
-ok('抽屉带 backdrop 模糊（玻璃观感 + 读得清）', /\.dvp-drawer\{[^}]*backdrop-filter:blur\(/.test(source)
-  && /\.dvp-drawer\{[^}]*background-image:linear-gradient/.test(source))
+ok('抽屉带 backdrop 模糊 + 不透明化（主题色叠 12 层，用户要求"不要透明"）',
+  /\.dvp-drawer\{[^}]*backdrop-filter:blur\(/.test(source)
+  && /var DRAWER_LAYERS = new Array\(12\)/.test(source)
+  && /background-image:' \+ DRAWER_LAYERS/.test(source))
+ok('面板有稳定最小高度（切标签不再上下跳）', /\.dvp-panel\{[^}]*min-height:min\(520px/.test(source))
 ok('面板本身也带 backdrop 模糊', /\.dvp-panel\{[^}]*backdrop-filter:blur\(/.test(source))
 // v0.4.0：素材区紧跟"挑文件夹"行，生图要求/来源文本排在它下面
 ok('素材区排在挑文件夹行之后、生图要求之前',

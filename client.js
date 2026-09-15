@@ -99,6 +99,12 @@ window.__ModuleLoader__.load({
     }
 
     // ─────────────────────────────────────────────────────────── 样式 ────────
+    // 抽屉"不透明化"用色（2026-09-15 用户："透明度还是不需要"）：开壁纸时主题的
+    // --dsw-alias-bg-* 全是半透明玻璃（实测 layer-2 = .17），只靠 backdrop 模糊，底下文字
+    // 仍会透出形状。不写死颜色：把**同一个主题色叠 12 层**，有效不透明度 1−0.83¹² ≈ 90%，
+    // 亮/暗主题各自跟着主题色走，再叠一层模糊兜底 ⇒ 视觉上是实色。
+    var DRAWER_TINT = 'var(--dsw-alias-bg-layer-2,rgba(45,37,55,.17))'
+    var DRAWER_LAYERS = new Array(12).fill('linear-gradient(' + DRAWER_TINT + ',' + DRAWER_TINT + ')').join(',')
     var CSS = [
       '[data-dvp-chip]{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.28));background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:16px;height:28px;padding:0 11px;border-radius:999px;cursor:pointer;transition:background-color .15s,color .15s,border-color .15s}',
       '[data-dvp-chip]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-label-primary)}',
@@ -106,7 +112,7 @@ window.__ModuleLoader__.load({
       '[data-dvp-chip] .dvp-ico{width:15px;height:15px;flex:none}',
       '[data-dvp-chip] .dvp-count{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:15px;padding:0 5px;border-radius:4px;font-size:10.5px;line-height:1;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.25));color:var(--dsw-alias-label-tertiary)}',
       '.dvp-wrap{position:relative;display:inline-flex;align-items:center}',
-      '.dvp-panel{position:absolute;z-index:60;top:calc(100% + 8px);left:0;width:720px;max-width:calc(100vw - 48px);max-height:calc(100dvh - 48px);display:flex;flex-direction:column;gap:10px;padding:14px;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.28));border-radius:14px;isolation:isolate;background:var(--dsw-alias-bg-module-platform,#fff);background-image:linear-gradient(var(--dsw-alias-bg-module-platform,#fff),var(--dsw-alias-bg-module-platform,#fff));backdrop-filter:blur(16px) saturate(115%);-webkit-backdrop-filter:blur(16px) saturate(115%);box-shadow:0 18px 48px rgba(0,0,0,.28);overflow:hidden}',
+      '.dvp-panel{position:absolute;z-index:60;top:calc(100% + 8px);left:0;width:720px;max-width:calc(100vw - 48px);min-height:min(520px,calc(100dvh - 48px));max-height:calc(100dvh - 48px);display:flex;flex-direction:column;gap:10px;padding:14px;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.28));border-radius:14px;isolation:isolate;background:var(--dsw-alias-bg-module-platform,#fff);background-image:linear-gradient(var(--dsw-alias-bg-module-platform,#fff),var(--dsw-alias-bg-module-platform,#fff));backdrop-filter:blur(16px) saturate(115%);-webkit-backdrop-filter:blur(16px) saturate(115%);box-shadow:0 18px 48px rgba(0,0,0,.28);overflow:hidden}',
       '.dvp-body{flex:0 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column;gap:10px;position:relative}',
       // 面板直接子节点默认不伸缩，高度由 layoutPanel() 实测分配；中段例外（见上一条，
       // 它必须能被压缩并自己滚）。`min-height:0` 是压住 flex 默认最小内容高度的关键，
@@ -189,7 +195,7 @@ window.__ModuleLoader__.load({
       // 文字 ⇒ 叠字看不清（用户 2026-09-14："透视底部，文字叠加看不出"）。
       // 只改颜色的 alpha 不行（源头就是半透明的），所以给抽屉加一层 backdrop 模糊：
       // 底下的内容被糊掉、抽屉自己的字清楚，同时壁纸仍然透得出来（保留玻璃观感）。
-      '.dvp-drawer{position:absolute;inset:0;z-index:6;display:flex;flex-direction:column;gap:8px;padding:10px;box-sizing:border-box;overflow:hidden;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.28));border-radius:10px;background:var(--dsw-alias-bg-layer-2,rgba(45,37,55,.17));background-image:linear-gradient(var(--dsw-alias-bg-layer-2,rgba(45,37,55,.17)),var(--dsw-alias-bg-layer-2,rgba(45,37,55,.17)));backdrop-filter:blur(18px) saturate(120%);-webkit-backdrop-filter:blur(18px) saturate(120%);isolation:isolate;box-shadow:0 8px 24px rgba(0,0,0,.18)}',
+      '.dvp-drawer{position:absolute;inset:0;z-index:6;display:flex;flex-direction:column;gap:8px;padding:10px;box-sizing:border-box;overflow:hidden;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.28));border-radius:10px;background:' + DRAWER_TINT + ';background-image:' + DRAWER_LAYERS + ';backdrop-filter:blur(18px) saturate(120%);-webkit-backdrop-filter:blur(18px) saturate(120%);isolation:isolate;box-shadow:0 8px 24px rgba(0,0,0,.18)}',
       '.dvp-drawerHead{flex:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
       // 任务记录（v0.6.0）：一行一条摘要（时间 · 类型 · 项数 · 过程目录），点开才拉产物文件。
       // 过程目录那一格用 direction:rtl —— 路径长了要截**前面**、留住尾部的目录名。
