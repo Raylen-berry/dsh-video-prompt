@@ -1,5 +1,19 @@
 # 变更记录
 
+## 0.6.3 — 2026-09-15 · pick-dir 补传 AbortSignal（修 live 上弹框根本不出现的 500）
+
+**实测踩坑**（用户："再测一次给我看"）：live 宿主 `POST /dvp/pick-dir` → 500
+`Cannot read properties of undefined (reading aborted)` —— 报错原文如此，aborted 是被读的那个键。
+根因：native 后端契约是 `capability().pick(signal)`，实现第一句就读 `signal.aborted`（取消对话框靠它），
+我们漏传参数 ⇒ OS 弹框根本没出现过。此前那次"触发过但没读到返回"其实就是这个崩溃。
+
+**改法**：`cap.pick(AbortSignal.timeout(5 * 60 * 1000))` —— 补 signal + 超时上限
+（人一直晾着对话框不至于让这条请求永远挂着）。
+
+**验证**：probe-host 新增 fakePicker **复刻宿主契约**（没有 signal 就按宿主的姿势炸）+ 2 项行为断言
+（206⇒208 项）；4/4 套件连跑全绿。
+**注意**：插件走 junction 装载、无热重载 ⇒ live 要看到弹框需重启桌面端加载新 index.js。
+
 ## 0.6.2 — 2026-09-15 · 面板改定高 + 页脚钉底（切标签不再上下跳）
 
 **背景**（用户 2026-09-15："四个标签都要一致"）：v0.6.1 给面板加的是 `min-height`，只保证不矮于某个值。
