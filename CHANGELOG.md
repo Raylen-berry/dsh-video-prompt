@@ -13,12 +13,15 @@
   中段（`.dvp-body`）自己吸收高度差；
 - `selfcheck` 断言随之从"有 min-height"改为"是定高且页脚钉底"两条同时成立。
 
-**顺带（为待办②铺路）**：`index.js` 新增可注入时间源 `export const clock = { now: () => new Date() }`，
-`localStampMinute()` 默认走它。批次/过程目录名精确到分钟，测试里"同一分钟建两个同名批次"这类断言
-按真实时钟跑会在 `-same-name` 与 `-same-name-2` 之间漂 ⇒ 门禁假红。**本次测试尚未注入固定时钟**，
-下一步在 `tools/probe-host.mjs` 设 `host.clock.now = () => new Date('2026-01-01T10:00:00')`。
+**顺带（flaky 根除）**：`index.js` 新增可注入时间源 `export const clock = { now: () => new Date() }`，
+`localStampMinute()` 默认走它；`tools/probe-host.mjs` 导入宿主后设
+`host.clock.now = () => new Date('2026-01-01T10:00:00')`。批次/过程目录名精确到分钟，
+"同一分钟建两个同名批次 ⇒ 第二个拿到 -2"这类断言按真实时钟跑会随跨不跨分钟边界漂移 ⇒ 门禁假红。
+时钟钉死后断言从"格式匹配（容忍任意后缀）"收紧成**精确值**：A=`2026-01-01_1000-same-name`、
+B=`…-same-name-2`，并新增一条独立断言（probe-host 205 ⇒ 206 项）。
+连跑 3 次 probe-host + verify-grok-bytes 全绿，此前"同分钟连跑两次假红"的坑一并封死。
 
-**验证**：`npm test` 4/4 套件通过（probe-host 205 / watch-idle 18 / grok-bytes 207 / selfcheck 286）。
+**验证**：`npm test` 4/4 套件通过（probe-host 206 / watch-idle 18 / grok-bytes 207 / selfcheck 286）。
 
 
 ## 0.6.0 — 2026-09-14 · 任务记录：给人看的表 + 给 agent 读的文本（两种读法）

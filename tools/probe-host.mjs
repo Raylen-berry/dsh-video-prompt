@@ -148,6 +148,12 @@ await fsp.writeFile(
 
 const host = await import(pathToFileURL(path.join(PKG, 'index.js')).href)
 
+// 固定时钟：批次/过程目录名精确到**分钟**，同名再加 -2/-3。按真实时钟跑，
+// 「同一分钟建两个同名批次 ⇒ 第二个拿到 -same-name-2」这类断言会随跨不跨分钟边界漂移，
+// 门禁时红时绿（假红比没测试更糟）。生产不设 ⇒ index.js 走真实时钟。
+host.clock.now = () => new Date('2026-01-01T10:00:00')
+const FIXED_STAMP = '2026-01-01_1000'
+
 console.log('\n1) apply() 挂在真 HTTP 服务上')
 await host.apply(fakeCtx, { mediaRoot: MEDIA, runsRoot: RUNS, registerSkills: true })
 ok('注册了 18 条路由', routes.length === 18, routes.map((r) => r.kind + ' ' + r.path))
@@ -417,7 +423,8 @@ const put = (body) => fetch(BASE + '/dvp/grok/plan', {
 const batchA = await post(batchBody('第一批', '第一批正文'))
 const batchB = await post(batchBody('第二批', '第二批正文'))
 ok('① 同名批次分到两个目录', batchA.ok && batchB.ok && batchA.dir !== batchB.dir, { a: batchA.dir, b: batchB.dir })
-ok('① batchId 带本地时间戳 + slug', /^\d{4}-\d{2}-\d{2}_\d{4}-same-name(-\d+)?$/.test(batchA.batchId || ''), batchA.batchId)
+ok('① batchId = 固定时钟的分钟戳 + slug（第一份不带后缀）', batchA.batchId === FIXED_STAMP + '-same-name', batchA.batchId)
+ok('① 同一分钟内第二个同名批次拿到 -2 后缀（跨分钟假红由此根除）', batchB.batchId === FIXED_STAMP + '-same-name-2', batchB.batchId)
 ok('① 两个批次目录都真的建好了', existsSync(batchA.dir) && existsSync(batchB.dir))
 ok('① 两个批次都在 grok-output 的子目录里', batchA.dir.startsWith(path.join(MEDIA, 'grok-output') + path.sep) && batchB.dir.startsWith(path.join(MEDIA, 'grok-output') + path.sep))
 const planA = JSON.parse(await fsp.readFile(path.join(batchA.dir, 'plan.json'), 'utf8'))
