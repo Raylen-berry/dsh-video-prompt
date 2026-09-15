@@ -183,9 +183,18 @@ function sanitizePipelineMode(raw) {
   return typeof raw === 'string' && PIPELINE_MODE_VALUES.includes(raw) ? raw : undefined
 }
 
+/**
+ * 时间源（可注入）。生产不设 ⇒ 走真实时钟。
+ * 为什么要有这个钩子：批次/过程目录名精确到**分钟**，同名再加 `-2/-3`。
+ * 测试里"同一分钟建两个同名批次 ⇒ 第二个应拿到 -2"这类断言，如果按真实时钟跑，
+ * **跨不跨分钟边界**会让结果在 `-same-name` 与 `-same-name-2` 之间漂 ⇒ 门禁时红时绿（假红）。
+ * 假红比没测试更糟（人会开始忽略红灯），所以把时钟做成夹具可控，而不是让测试去猜时间。
+ */
+export const clock = { now: () => new Date() }
+
 /** 本地时间戳，精确到分钟：`2026-09-11_1705`。过程目录/运行目录的命名主体。 */
 function localStampMinute(date) {
-  const t = date || new Date()
+  const t = date || clock.now()
   const pad = (n) => (n < 10 ? '0' + n : String(n))
   return t.getFullYear() + '-' + pad(t.getMonth() + 1) + '-' + pad(t.getDate()) + '_' + pad(t.getHours()) + pad(t.getMinutes())
 }

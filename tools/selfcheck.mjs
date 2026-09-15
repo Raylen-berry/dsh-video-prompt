@@ -383,7 +383,8 @@ ok('抽屉带 backdrop 模糊 + 不透明化（主题色叠 12 层，用户要�
   /\.dvp-drawer\{[^}]*backdrop-filter:blur\(/.test(source)
   && /var DRAWER_LAYERS = new Array\(12\)/.test(source)
   && /background-image:' \+ DRAWER_LAYERS/.test(source))
-ok('面板有稳定最小高度（切标签不再上下跳）', /\.dvp-panel\{[^}]*min-height:min\(520px/.test(source))
+ok('面板是**定高**（四个栏目总高一致、页脚钉底，切标签不上下跳）',
+  /\.dvp-panel\{[^}]*height:min\(560px/.test(source) && /\.dvp-foot\{margin-top:auto/.test(source))
 ok('面板本身也带 backdrop 模糊', /\.dvp-panel\{[^}]*backdrop-filter:blur\(/.test(source))
 // v0.4.0：素材区紧跟"挑文件夹"行，生图要求/来源文本排在它下面
 ok('素材区排在挑文件夹行之后、生图要求之前',

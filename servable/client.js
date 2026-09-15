@@ -112,7 +112,7 @@ window.__ModuleLoader__.load({
       '[data-dvp-chip] .dvp-ico{width:15px;height:15px;flex:none}',
       '[data-dvp-chip] .dvp-count{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:15px;padding:0 5px;border-radius:4px;font-size:10.5px;line-height:1;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.25));color:var(--dsw-alias-label-tertiary)}',
       '.dvp-wrap{position:relative;display:inline-flex;align-items:center}',
-      '.dvp-panel{position:absolute;z-index:60;top:calc(100% + 8px);left:0;width:720px;max-width:calc(100vw - 48px);min-height:min(520px,calc(100dvh - 48px));max-height:calc(100dvh - 48px);display:flex;flex-direction:column;gap:10px;padding:14px;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.28));border-radius:14px;isolation:isolate;background:var(--dsw-alias-bg-module-platform,#fff);background-image:linear-gradient(var(--dsw-alias-bg-module-platform,#fff),var(--dsw-alias-bg-module-platform,#fff));backdrop-filter:blur(16px) saturate(115%);-webkit-backdrop-filter:blur(16px) saturate(115%);box-shadow:0 18px 48px rgba(0,0,0,.28);overflow:hidden}',
+      '.dvp-panel{position:absolute;z-index:60;top:calc(100% + 8px);left:0;width:720px;max-width:calc(100vw - 48px);height:min(560px,calc(100dvh - 48px));max-height:calc(100dvh - 48px);display:flex;flex-direction:column;gap:10px;padding:14px;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.28));border-radius:14px;isolation:isolate;background:var(--dsw-alias-bg-module-platform,#fff);background-image:linear-gradient(var(--dsw-alias-bg-module-platform,#fff),var(--dsw-alias-bg-module-platform,#fff));backdrop-filter:blur(16px) saturate(115%);-webkit-backdrop-filter:blur(16px) saturate(115%);box-shadow:0 18px 48px rgba(0,0,0,.28);overflow:hidden}',
       '.dvp-body{flex:0 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column;gap:10px;position:relative}',
       // 面板直接子节点默认不伸缩，高度由 layoutPanel() 实测分配；中段例外（见上一条，
       // 它必须能被压缩并自己滚）。`min-height:0` 是压住 flex 默认最小内容高度的关键，
@@ -178,7 +178,9 @@ window.__ModuleLoader__.load({
       '.dvp-select{height:26px;max-width:220px;padding:0 4px;border-radius:7px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.28));background:var(--dsw-alias-bg-module-platform,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-primary);font:inherit;font-size:11.5px;box-sizing:border-box;cursor:pointer}',
       '.dvp-ta{width:100%;min-height:64px;max-height:min(28vh,240px);resize:vertical;padding:8px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.28));background:var(--dsw-alias-bg-base,transparent);color:var(--dsw-alias-label-primary);font:inherit;font-size:11.5px;line-height:1.65;box-sizing:border-box}',
       '.dvp-count{font-size:10.5px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}',
-      '.dvp-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.18));padding-top:10px;flex-wrap:wrap}',
+      // 页脚钉底（margin-top:auto）：面板定高后，内容少的栏目把富余留给它，
+      // 四个栏目的页脚都停在同一位置 ⇒ 切标签不上下跳（2026-09-15 用户："四个标签都要一致"）。
+      '.dvp-foot{margin-top:auto;display:flex;align-items:center;justify-content:space-between;gap:10px;border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.18));padding-top:10px;flex-wrap:wrap}',
       '.dvp-btns{display:flex;gap:8px;flex:0 0 auto;flex-wrap:nowrap;white-space:nowrap;justify-content:flex-end}',
       '.dvp-hint{font-size:11px;color:var(--dsw-alias-label-tertiary);line-height:1.6;flex:1 1 auto;min-width:150px;max-width:380px}',
       '.dvp-fileRow{display:flex;align-items:center;gap:6px;flex-wrap:nowrap}',
