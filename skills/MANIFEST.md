@@ -8,6 +8,7 @@
 | `prompt-videos` | [`replicate/skills`](https://github.com/replicate/skills) → `skills/prompt-videos/` | **Apache-2.0**（不是 MIT） | Video prompt optimization guidance |
 | `video-generation` | [`bytedance/deer-flow`](https://github.com/bytedance/deer-flow) → `skills/public/video-generation/` | MIT | Structured video generation workflow |
 | `viral-media-copywriter` | 本地打包（2026-09-11 随 viral-media-copywriter.zip 进包）；**上游未确认**：包内无作者无仓库，GitHub 按名搜索 `total_count=0` | 来源未确认 | 通用爆款素材模型：素材库清点、四层抽象元素卡、跨样本创意基因与原创文案 |
+| `image-prompt-director` | 用户自有文档《海外网文封面Prompt导演_爆款增强版》（2026-09-17 由用户提供并授权入包），逐字收录为 A | 用户本人作品 | **A · 生图 Prompt 导演规则**：B（执行 AI）产出 C（生图提示词）时照此执行；设置页「生图逻辑」展示/复制，电池可拔 |
 
 **许可证那一列是 2026-09-14 用 GitHub API 逐个回读核实的**（`/repos/{o}/{r}/license`），不是照抄"应该都是 MIT"。
 两处需要当回事：

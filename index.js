@@ -29,11 +29,13 @@
 //                                            （同名 first-wins，改已有技能正文仍需重启）
 //
 //   ② 技能注册（skills 服务，全局层）
-//        把本包 skills/ 下 6 个技能注册进目录：
+//        把本包 skills/ 下 7 个技能注册进目录：
 //        video-prompt-pipeline / watch / oneshot-prompt-generator /
-//        prompt-videos / video-generation / viral-media-copywriter
+//        prompt-videos / video-generation / viral-media-copywriter / image-prompt-director
 //        注册内容含 frontmatter 摘要与正文，resourceBase 指向包内真实目录，
 //        因此 agent 读 references/ scripts/ 时路径是通的。
+//        v0.8.0「可拆卸电池」：设置页可按名字卸载/装回单个技能 —— 卸载 = 调它的 dispose
+//        （真的从目录里消失），名单记在 state.json.disabledSkills；开机注册与 reload 都跳过名单里的。
 //
 //   ③ 配置默认值：媒体根目录 / 运行产物根目录（cordis.patch.yml 可覆盖）
 //
@@ -188,6 +190,29 @@ export const IMAGE_ENGINE_DEFAULT = 'grok'
 export function normalizeImageEngine(raw) {
   const key = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
   return Object.prototype.hasOwnProperty.call(IMAGE_ENGINES, key) ? key : IMAGE_ENGINE_DEFAULT
+}
+
+// ── 执行 AI（B）· v0.8.0 ─────────────────────────────────────────────────────
+// 角色链固定五个名字，代码 / README / 派发请求里都用这一套：
+//   A 给生图 AI 的 Prompt 导演规则 —— skills/image-prompt-director/SKILL.md（技能电池之一）
+//   B 执行 AI —— 读素材 + 按 A 写出 C 的那一家。默认「本会话」= 当前 DSH 里的 agent；
+//     选了别家时派发请求第一步就是 browser_open 打开它的网页（url 字段），喂 A+素材要点、回收 C。
+//   C 生图 Prompt —— 批次目录 driver.md 的提示词清单
+//   D 生图引擎 —— 上面的 IMAGE_ENGINES（grok / chatgpt），只服务生图出图那一步；
+//     生视频与爆款分析**没有 D**（一个走会话产出+参考图，一个只出报告），它们的最后一选是 B。
+//   E 成图 —— 回收进面板所选产物目录下的批次目录（页面内 raw bytes POST，四道门不变）
+// 「会话内」的 B 没有 url：留空或选 self 时行为与 v0.7.x 完全一致。
+export const EXECUTOR_AIS = Object.freeze({
+  self: { value: 'self', label: '本会话（默认）', url: '', hint: '就是当前 DSH 会话里的 agent：不跳转任何网页，直接读素材、按 A 写 C' },
+  grok: { value: 'grok', label: 'Grok（网页）', url: 'https://grok.com/', hint: '让 grok.com 的对话来写 C：浏览器打开它、粘 A 规则与素材要点，回收它的回答当提示词' },
+  chatgpt: { value: 'chatgpt', label: 'ChatGPT（网页）', url: 'https://chatgpt.com/', hint: '让 chatgpt.com 的对话来写 C：走你 Edge 的登录态' },
+})
+export const EXECUTOR_AI_DEFAULT = 'self'
+
+/** 把调用方给的执行 AI 收成合法键；不认识的退默认（self）。 */
+export function normalizeExecutorAI(raw) {
+  const key = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+  return Object.prototype.hasOwnProperty.call(EXECUTOR_AIS, key) ? key : EXECUTOR_AI_DEFAULT
 }
 
 function sanitizeGrokOptions(raw) {
@@ -570,6 +595,11 @@ export function driverDoc(plan) {
   lines.push('- 图片落地：' + plan.dir)
   lines.push('- 批次文件：' + path.join(plan.dir, 'plan.json'))
   if (plan.processDir) lines.push('- 过程目录：' + plan.processDir + '（拆帧/中间草稿写这里，目录名=执行时间 年-月-日_时分）')
+  // v0.8.0 角色链：B（执行 AI）建批次时定下来，跟 engine 一样只认盘上这一份。
+  const executor = normalizeExecutorAI(plan.executorAI)
+  const executorDef = EXECUTOR_AIS[executor]
+  lines.push('- 执行 AI（B）：' + executorDef.label + (executor === EXECUTOR_AI_DEFAULT ? '' : ' —— 提示词（C）由它按 A 的导演规则产出；打开：' + executorDef.url))
+  lines.push('  （角色链：A=生图 Prompt 导演规则（技能 image-prompt-director，设置页可覆盖正文）· B=执行 AI · C=生图 Prompt · D=生图引擎（' + engine.label + '）· E=成图回收进本批次目录）')
   if (plan.options && typeof plan.options === 'object') {
     const labels = { clarity: '清晰度', aspect: '画幅', count: '每个提示词张数' }
     const parts = []
@@ -585,9 +615,16 @@ export function driverDoc(plan) {
   lines.push('')
   lines.push('## 执行方式')
   lines.push('')
-  lines.push('由会话里的 agent 用浏览器插件驱动用户的 Edge：')
-  lines.push('')
-  lines.push('1. `browser_open(use:"edge", url:"' + (plan.grokUrl || engine.url) + '")` —— 走用户登录态。')
+  if (executor === EXECUTOR_AI_DEFAULT) {
+    lines.push('由会话里的 agent（B=本会话）用浏览器插件驱动用户的 Edge：')
+    lines.push('')
+    lines.push('1. `browser_open(use:"edge", url:"' + (plan.grokUrl || engine.url) + '")` —— 走用户登录态。')
+  } else {
+    lines.push('执行 AI（B）是 ' + executorDef.label + '：先打开它的网页按 A（技能 image-prompt-director）产出提示词，再由本清单驱动 D（' + engine.label + '）出图。')
+    lines.push('')
+    lines.push('0. `browser_open(use:"edge", url:"' + executorDef.url + '")` —— B 的站点同样走用户 Edge 登录态；把 A 的规则与素材要点喂给它，回收它写的 C 回填到下面的提示词清单。')
+    lines.push('1. `browser_open(use:"edge", url:"' + (plan.grokUrl || engine.url) + '")` —— 出图引擎 D 走用户登录态。')
+  }
   lines.push('2. 未登录 / 出现人机验证 / 额度用尽时**停下来叫人**，不允许绕过。')
   lines.push('3. 逐条把下面提示词贴进 ' + engine.label + ' 输入框并发送，等新图出现。')
   if (typeof plan.options === 'object' && plan.options !== null && typeof plan.options.aspect === 'string') {
@@ -1539,6 +1576,8 @@ export async function apply(ctx, rawConfig = {}) {
     ...('mediaRoot' in persisted ? { mediaRoot: persisted.mediaRoot } : {}),
     ...('runsRoot' in persisted ? { runsRoot: persisted.runsRoot } : {}),
   })
+  // v0.8.0 技能电池：state.json 里的 disabledSkills 是运行期事实，开机就带上。
+  runtime.disabledSkills = Array.isArray(persisted.disabledSkills) ? persisted.disabledSkills.slice() : []
   const mediaRoot = () => runtime.mediaRoot
   const runsRoot = () => runtime.runsRoot
   const allowedRoots = [runtime.mediaRoot, runtime.runsRoot, path.resolve(process.cwd())]
@@ -1774,9 +1813,13 @@ export async function apply(ctx, rawConfig = {}) {
       try {
         if (req.method === 'GET') {
           const state = await readState()
+          // v0.8.0：执行 AI（B）用"运行期生效值"回话 —— 盘上没有这个键时前端要看到 self，
+          // 而不是 undefined（前端拿它渲染下拉，undefined 会渲染成空选中）。
+          const executorAI = normalizeExecutorAI(state.executorAI)
           sendJson(res, 200, {
             ok: true,
-            state,
+            state: { ...state, executorAI },
+            executorAI,
             defaults: { mediaRoot: mediaRoot(), runsRoot: runsRoot() },
             skills: (await currentSkills()).map((s) => s.name),
           })
@@ -1786,8 +1829,19 @@ export async function apply(ctx, rawConfig = {}) {
           const patch = JSON.parse(await readBody(req))
           const grokOptions = sanitizeGrokOptions(patch.grokOptions)
           // 面板上的"生图引擎"下拉：值必须落在 IMAGE_ENGINES 里，非法值退默认（Grok）。
-    const imageEngine = normalizeImageEngine(patch.imageEngine)
+          const imageEngine = normalizeImageEngine(patch.imageEngine)
     const pipelineMode = sanitizePipelineMode(patch.pipelineMode)
+          // v0.8.0：执行 AI（B）与技能电池名单。B 只认 EXECUTOR_AIS 里的键，非法值退默认 self；
+          // 提交时显式传错直接拒 —— 与 imageEngine「不静默改名」同一口径。
+          const executorAI = normalizeExecutorAI(patch.executorAI)
+          if ('executorAI' in patch && patch.executorAI !== null && typeof patch.executorAI === 'string'
+            && patch.executorAI.trim() !== '' && executorAI !== patch.executorAI.trim().toLowerCase()) {
+            sendJson(res, 400, { ok: false, error: 'executorAI 不认识：' + String(patch.executorAI).slice(0, 40) + '（只认 ' + Object.keys(EXECUTOR_AIS).join(' / ') + '）' })
+            return
+          }
+          const disabledSkills = Array.isArray(patch.disabledSkills)
+            ? patch.disabledSkills.filter((n) => typeof n === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(n))
+            : undefined
           // 只提交了哪个字段就只改哪个：没提交（undefined）保留现值，null 才是明确清空。
           // 早先写成 `typeof patch.mediaRoot === 'string' ? … : undefined`，于是面板只提交
           // `{ pipelineMode }` 时两个根被 undefined 覆盖 —— state.json 里的媒体/产物目录直接消失。
@@ -1798,7 +1852,12 @@ export async function apply(ctx, rawConfig = {}) {
           // 只在调用方**提交了** imageEngine 时才写；没提交保留现值（与目录字段同一口径）。
           if ('imageEngine' in patch) statePatch.imageEngine = imageEngine
           if (pipelineMode !== undefined) statePatch.pipelineMode = pipelineMode
+          // B 与电池名单：只有调用方**提交了**才写；空数组/null = 全部装回（删键）。
+          if ('executorAI' in patch) statePatch.executorAI = patch.executorAI === null || executorAI === EXECUTOR_AI_DEFAULT ? null : executorAI
+          if (disabledSkills !== undefined) statePatch.disabledSkills = disabledSkills.length > 0 ? disabledSkills : null
           const next = await writeState(statePatch)
+          // 电池名单是运行期事实：reload/开机注册都读它，保存后立刻生效（不用重启）
+          runtime.disabledSkills = Array.isArray(next.disabledSkills) ? next.disabledSkills.slice() : []
           // 保存成功就同步刷新运行期配置：后面写盘的每个路由都打新目录
           // （不再"保存了新目录、还写旧目录"）。`statePatch` 里带 null 的键 = 明确清空，
           // resolveRuntime 会把它落回 config 默认目录。
@@ -1810,7 +1869,9 @@ export async function apply(ctx, rawConfig = {}) {
           }
           sendJson(res, 200, {
             ok: true,
-            state: next,
+            // 同 GET：executorAI 一律回"生效值"（盘上被清成 null 时回 self）
+            state: { ...next, executorAI: normalizeExecutorAI(next.executorAI) },
+            executorAI: normalizeExecutorAI(next.executorAI),
             // 当前**实际生效**的路径（展开过 ~ / $DSH_HOME 的绝对路径），面板据此显示与回报
             effective: { mediaRoot: runtime.mediaRoot, runsRoot: runtime.runsRoot },
             defaults: { mediaRoot: runtime.mediaRoot, runsRoot: runtime.runsRoot },
@@ -2172,6 +2233,8 @@ export async function apply(ctx, rawConfig = {}) {
       createdAt: new Date().toISOString(),
       batchId,
       engine,
+      // v0.8.0：执行 AI（B）建批次时定下来，与 engine 同一口径 —— 续做只认盘上这份。
+      executorAI: normalizeExecutorAI(body.executorAI),
       saveNonce,
       grokUrl: typeof body.grokUrl === 'string' && body.grokUrl !== '' ? body.grokUrl : IMAGE_ENGINES[engine].url,
       dir,
@@ -2216,6 +2279,8 @@ export async function apply(ctx, rawConfig = {}) {
       ...grokBatchInfo(root, batchId, dir),
       count: plan.count,
       engine,
+      // 回包把 B 一起带上：面板的任务记录要显示"这批的 C 由谁写的"，否则只能再读一次盘。
+      executorAI: plan.executorAI,
       // nonce 交给调用方（面板 → 派发请求 → 会话里的 agent → 页面内 POST 时带上）。
       // 它只在这条批次通道里有效，不是账号凭据；但除本响应与批次 plan.json 外不再另发一份。
       saveNonce,
@@ -2689,10 +2754,14 @@ export async function apply(ctx, rawConfig = {}) {
     },
   }))
 
-  // ---- ⑩ 技能注册 ----
+  // ---- ⑩ 技能注册（v0.8.0：可拆卸电池）----
   // 抽成 registerSkillPack()：开机注册与 /dvp/skills/reload 共用同一份扫描+注册逻辑。
   // 注意 dsh-skill 的 runtime 注册对**同名**是 first-wins（重复注册只告警不覆盖），
   // 所以 reload 只能让"上次开机之后新增的技能目录"免重启生效；改已有技能正文仍要重启。
+  // 电池名单 runtime.disabledSkills 里的名字**不注册**；卸载/装回走 /dvp/skills/toggle，
+  // 它调登记过的 dispose —— 真的从目录里消失/回来，不用重启。dispose 只在本次进程有效，
+  // 名单落 state.json，下次开机由 registerSkillPack 直接跳过（语义一致）。
+  const skillDisposers = new Map()
   async function registerSkillPack() {
     const names = []
     const skillsServiceNow = ctx.get('skills')
@@ -2704,7 +2773,14 @@ export async function apply(ctx, rawConfig = {}) {
       console.warn('[dsh-video-prompt] 技能包读取失败：' + String((err && err.message) || err))
       return names
     }
+    const disabled = new Set(runtime.disabledSkills || [])
     for (const skill of skills) {
+      if (disabled.has(skill.name)) continue
+      if (skillDisposers.has(skill.name)) {
+        // 本进程已注册过（reload 场景）：first-wins，别重复注册刷告警
+        names.push(skill.name)
+        continue
+      }
       try {
         const dispose = skillsServiceNow.register({
           name: skill.name,
@@ -2717,13 +2793,32 @@ export async function apply(ctx, rawConfig = {}) {
           resourceBase: skill.resourceBase,
           path: path.join(skill.dir, 'SKILL.md'),
         })
-        disposers.push(dispose)
+        skillDisposers.set(skill.name, typeof dispose === 'function' ? dispose : () => {})
+        disposers.push(() => {
+          if (skillDisposers.has(skill.name)) skillDisposers.delete(skill.name)
+        })
         names.push(skill.name)
       } catch (err) {
         console.warn(`[dsh-video-prompt] 技能 ${skill.name} 注册失败：` + String((err && err.message) || err))
       }
     }
     return names
+  }
+
+  /** 电池格子的清单：盘上有什么技能、哪些装着、哪些被拔了。设置页读它渲染。 */
+  async function listSkillBattery() {
+    let skills = []
+    try {
+      skills = await loadSkills(SKILLS_ROOT)
+    } catch { /* 读不到就空清单，前端如实显示 */ }
+    const disabled = new Set(runtime.disabledSkills || [])
+    return skills.map((s) => ({
+      name: s.name,
+      description: s.description.slice(0, 160),
+      installed: !disabled.has(s.name),
+      // 卸载件在本进程有活 dispose ⇒ 装回即时生效；纯靠开机重扫的（重启后没碰过）也能装回，只是走 reload
+      canToggle: true,
+    }))
   }
 
   let registered = []
@@ -2754,8 +2849,125 @@ export async function apply(ctx, rawConfig = {}) {
           ok: true,
           added: names.filter((n) => !before.has(n) && after.has(n)),
           alreadyRegistered: names.filter((n) => before.has(n)),
+          battery: await listSkillBattery(),
           note: '同名技能是 first-wins：改已有技能的正文要重启桌面端才会换新',
         })
+      } catch (err) {
+        sendJson(res, 500, { ok: false, error: String((err && err.message) || err) })
+      }
+    },
+  }))
+
+  // ---- ⑩b 技能电池插拔（v0.8.0）----
+  // POST /dvp/skills/toggle  body: { name, installed }
+  //   installed=false ⇒ 调该技能的 dispose 从目录里真拔掉 + 记进 disabledSkills；
+  //   installed=true  ⇒ 移出名单；本进程有活 dispose 就直接再注册一次（即时装回），
+  //                     没有（宿主重启过、只认盘上名单）就提示点「重扫技能包」。
+  // 只认本包 skills/ 目录里真实存在的名字，陌生名字 400 —— 免得把 state.json 写脏。
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/dvp/skills/toggle',
+    handler: async (req, res) => {
+      try {
+        if (req.method !== 'POST' && req.method !== 'PUT') {
+          sendJson(res, 405, { ok: false, error: '方法不允许' })
+          return
+        }
+        const body = JSON.parse(await readBody(req))
+        const target = typeof body.name === 'string' ? body.name.trim() : ''
+        const wantInstalled = body.installed === true
+        const known = new Set((await loadSkills(SKILLS_ROOT)).map((s) => s.name))
+        if (!known.has(target)) {
+          sendJson(res, 400, { ok: false, error: '不认识的技能名：' + target.slice(0, 64) + '（只认本包 skills/ 下的）' })
+          return
+        }
+        // 拔之前先问 services 层要真句柄：register 返回的 dispose 可能只是"本次组合"的回收器，
+        // 跨路由/跨重启拿不到它时不能谎称已卸载 —— 如实报 fallback，让前端提示"重启后生效"。
+        const skillsServiceNow = ctx.get('skills')
+        const list = new Set(runtime.disabledSkills || [])
+        let unhooked = false
+        let reregisteredNow = false
+        if (wantInstalled) {
+          list.delete(target)
+          runtime.disabledSkills = Array.from(list)
+          // 本进程登记过这个技能（dispose 还在手上）⇒ 立刻重注册，装回即时生效；
+          // 没有（宿主重启过、只认盘上名单）⇒ 交给「重扫技能包」/下次开机。
+          if (skillDisposers.has(target)) {
+            skillDisposers.delete(target)
+            await registerSkillPack()
+            reregisteredNow = true
+          }
+        } else {
+          const off = skillDisposers.get(target)
+          if (typeof off === 'function') {
+            try { off(); unhooked = true } catch { /* 已经没了也算拔掉 */ unhooked = true }
+          }
+          // 注意：这里**不删** skillDisposers 里的句柄。删了就等于"装回只能靠重扫"——
+          // 用户拔掉再点装回时我们会拿不到旧句柄，明明本进程能立刻重注册却只能提示重启。
+          // 保留句柄不冲突：registerSkillPack 第一道就跳过 disabledSkills 里的名字。
+          list.add(target)
+          runtime.disabledSkills = Array.from(list)
+        }
+        const next = await writeState({ disabledSkills: runtime.disabledSkills.length > 0 ? runtime.disabledSkills : null })
+        runtime.disabledSkills = Array.isArray(next.disabledSkills) ? next.disabledSkills.slice() : []
+        const stillListed = (await currentSkills()).some((s) => s.name === target)
+        sendJson(res, 200, {
+          ok: true,
+          name: target,
+          installed: wantInstalled,
+          // 前端要拿这两个布尔决定说哪句话："已立刻装回" vs "点重扫技能包"，"已摘除" vs "宿主缓存还在"
+          reregisteredNow,
+          unhooked,
+          battery: await listSkillBattery(),
+          ...(wantInstalled && !reregisteredNow ? { note: '已记住装回；它上次不是本进程注册的，点「重扫技能包」立即生效' } : {}),
+          ...(!wantInstalled && stillListed ? { note: '已从本包的登记里摘除；目录里仍看得到说明是宿主 services 层的缓存，重启后彻底消失' } : {}),
+          ...(skillsServiceNow === undefined ? { warning: 'skills 服务当前不可用，这次只改了名单（state.json），启停要在宿主在线时再点一次' } : {}),
+        })
+      } catch (err) {
+        sendJson(res, 400, { ok: false, error: String((err && err.message) || err) })
+      }
+    },
+  }))
+
+  // GET /dvp/skills → 电池清单（设置页打开时读一次）
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/dvp/skills',
+    handler: async (req, res) => {
+      try {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { ok: false, error: '方法不允许' })
+          return
+        }
+        sendJson(res, 200, { ok: true, battery: await listSkillBattery(), disabled: (runtime.disabledSkills || []).slice() })
+      } catch (err) {
+        sendJson(res, 500, { ok: false, error: String((err && err.message) || err) })
+      }
+    },
+  }))
+
+  // GET /dvp/director → A 的正文（技能 image-prompt-director/SKILL.md）。
+  // 只读包内这一个文件、路径写死 —— 不是通用文件口；设置页「查看全文/复制 A 全文」用它。
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/dvp/director',
+    handler: async (req, res) => {
+      try {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { ok: false, error: '方法不允许' })
+          return
+        }
+        const file = path.join(SKILLS_ROOT, 'image-prompt-director', 'SKILL.md')
+        if (!within(PACKAGE_ROOT, file) || !existsSync(file)) {
+          sendJson(res, 404, { ok: false, error: '找不到 A（skills/image-prompt-director/SKILL.md）' })
+          return
+        }
+        const text = await fsp.readFile(file, 'utf8')
+        // 面板看的是"裸正文"：frontmatter 是给技能系统读的元数据（name/description/when_to_use），
+        // 直接摊给用户看会把 20 行元数据当成规则开头。原文里有 `---` 分隔线也会被误当 frontmatter，
+        // 所以只剥开头那一段（^--- 到下一个独立 --- 行），剥不掉就原样返回。
+        const body = text.replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---\r?\n/, '')
+        sendJson(res, 200, { ok: true, name: 'image-prompt-director', path: file, chars: body.length, fileChars: text.length, text: body.slice(0, MAX_TEXT_BYTES) })
       } catch (err) {
         sendJson(res, 500, { ok: false, error: String((err && err.message) || err) })
       }

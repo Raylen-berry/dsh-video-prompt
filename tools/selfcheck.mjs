@@ -251,13 +251,13 @@ ok('清晰度默认是 1080p', (defs.find((d) => d.key === 'clarity') || {}).val
 section('3c2) 生图引擎可选（Grok / ChatGPT·Edge）')
 
 const engines = exportsObj.internals.IMAGE_ENGINES
+const engineHost = await import(pathToFileURL(path.join(PKG, 'index.js')).href)
 ok('引擎候选有 grok 与 chatgpt 两条', Array.isArray(engines) && engines.length === 2
   && engines.map((e) => e.value).join(',') === 'grok,chatgpt', engines && engines.map((e) => e.value))
 ok('每条引擎都有 label/url/hint，url 是 https', engines.every((e) => e.label && /^https:\/\//.test(e.url) && e.hint && e.hint.length > 8))
 ok('默认引擎是 Grok（老行为不变）', exportsObj.internals.engineDef(undefined).value === 'grok'
   && exportsObj.internals.engineDef('').value === 'grok')
 ok('engineDef 认得 chatgpt 并给出站点', exportsObj.internals.engineDef('chatgpt').url === 'https://chatgpt.com/')
-const engineHost = await import(pathToFileURL(path.join(PKG, 'index.js')).href)
 const chatText = exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output', '', opts, undefined, '', '', '', 'chatgpt')
 ok('选 ChatGPT 时请求指向 chatgpt.com 而不是 grok.com', chatText.includes('https://chatgpt.com/') && !chatText.includes('grok.com'), chatText.slice(0, 200))
 ok('请求文案里的引擎名跟着变（ChatGPT 输入框/比例按钮）', chatText.includes('在 ChatGPT（Edge） 里出图') && chatText.includes('贴进 ChatGPT（Edge） 输入框') && chatText.includes('切 ChatGPT（Edge） 页面上的同名比例按钮'))
@@ -265,12 +265,9 @@ ok('browser_open 步骤带 use:"edge" 与所选 url', chatText.includes('browser
 const grokEngineText = exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output', '', opts, undefined, '', '', '', 'grok')
 ok('选 Grok（或不传）时仍是 grok.com', grokEngineText.includes('https://grok.com/') && !grokEngineText.includes('chatgpt.com'))
 ok('不传引擎的老调用方仍走 Grok（向后兼容）', exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output').includes('https://grok.com/'))
-ok('面板渲染出生图引擎下拉（Grok + ChatGPT 两个 option）', /data-dvp-engine/.test(source) && source.includes("label: 'ChatGPT（Edge）'") && source.includes("'生图引擎'"))
-// v0.7.1（用户 2026-09-16："还需要加一个用 Edge 的 ChatGPT 生图选项"）：那一栏在文件列表下面，
-// 面板整列滚动 ⇒ 不滚到底就看不见。栏目条右侧补一份同样的开关，两处共用同一个 state。
-// 渲染出来的 DOM 断言放在下面拿得到 panelHtml 的地方（这里只能断言源码）。
-ok('栏目条引擎与「生图要求」里那一栏绑同一个 state', (source.match(/setImageEngine\(event\.target\.value\)/g) || []).length === 2)
-ok('栏目条引擎只在生图栏目出现（生文案/爆款不掺和）', /tab === 'image' \? h\('label', \{ className: 'dvp-opt dvp-engineTop'/.test(source))
+ok('面板渲染出生图引擎下拉（Grok + ChatGPT 两个 option，标着 D）', /data-dvp-engine/.test(source) && source.includes("label: 'ChatGPT（Edge）'") && source.includes("'生图引擎（D）'"))
+// v0.8.0：栏目条那份快捷开关删除 —— 只剩一处 setImageEngine(event.target.value)。
+ok('引擎只有一份下拉（v0.7.1 的快捷副本已撤）', (source.match(/setImageEngine\(event\.target\.value\)/g) || []).length === 1, (source.match(/setImageEngine\(event\.target\.value\)/g) || []).length)
 ok('宿主 IMAGE_ENGINES 与客户端候选对齐（value/url）', ['grok', 'chatgpt'].every((v) => engineHost.IMAGE_ENGINES[v] !== undefined
   && engines.some((e) => e.value === v && e.url === engineHost.IMAGE_ENGINES[v].url)))
 ok('宿主 normalizeImageEngine 非法值退默认 grok', engineHost.normalizeImageEngine('nano-banana') === 'grok'
@@ -280,6 +277,36 @@ ok('CORS 白名单收 chatgpt 域与成图 CDN', engineHost.GROK_SAVE_ALLOWED_OR
 ok('origin 判别器认得两家（grok/chatgpt），陌生源返回空串', engineHost.engineForOrigin('https://chatgpt.com') === 'chatgpt'
   && engineHost.engineForOrigin('https://raic.oaidimgs.net') === 'chatgpt' && engineHost.engineForOrigin('https://grok.com') === 'grok'
   && engineHost.engineForOrigin('') === '' && engineHost.engineForOrigin('https://evil.example') === '')
+
+// ── 3c3. 执行 AI（B）· v0.8.0 ───────────────────────────────────────────────
+section('3c3) 执行 AI（B）与 A/B/C/D/E 角色链')
+{
+  const exs = exportsObj.internals.EXECUTOR_AIS
+  ok('客户端 B 候选三条：self/grok/chatgpt', Array.isArray(exs) && exs.map((e) => e.value).join(',') === 'self,grok,chatgpt', exs && exs.map((e) => e.value))
+  ok('每条 B 有 label/url/hint；只有 self 没有 url', exs.every((e) => e.label && e.hint && (e.value === 'self' ? e.url === '' : /^https:\/\//.test(e.url))))
+  ok('executorDef 不认识的退 self', exportsObj.internals.executorDef(undefined).value === 'self' && exportsObj.internals.executorDef('nope').value === 'self')
+  ok('宿主 EXECUTOR_AIS 与客户端对齐（value/url）', ['self', 'grok', 'chatgpt'].every((v) => engineHost.EXECUTOR_AIS[v] !== undefined
+    && exs.some((e) => e.value === v && e.url === engineHost.EXECUTOR_AIS[v].url)))
+  ok('宿主 normalizeExecutorAI 非法值退 self、大小写宽容', engineHost.normalizeExecutorAI('nano') === 'self'
+    && engineHost.normalizeExecutorAI('CHATGPT') === 'chatgpt' && engineHost.normalizeExecutorAI(undefined) === 'self')
+  // 派发请求带 B：默认 self ⇒ "就是你"；选 chatgpt ⇒ 第一步打开 chatgpt.com
+  const bSelf = exportsObj.internals.buildDispatchRequest(items, 'D:/media', 'D:/runs', PROC)
+  ok('B=self 时写明执行 AI 是本会话', bSelf.includes('执行 AI（B）：本会话') && bSelf.includes('就是你'))
+  const bChat = exportsObj.internals.buildDispatchRequest(items, 'D:/media', 'D:/runs', PROC, 'chatgpt')
+  ok('B=chatgpt 时请求给出跳转站点', bChat.includes('https://chatgpt.com/') && bChat.includes('回收它写的 C'))
+  const grokB = exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output', '', opts, undefined, PROC, '', '', 'grok', 'grok')
+  ok('出图请求同时标 B 与 D（生图引擎（D）行）', grokB.includes('执行 AI（B）：Grok（网页）') && grokB.includes('生图引擎（D）：Grok'))
+  const viralB = exportsObj.internals.buildViralRequest(items, 'D:/media', 'D:/runs', PROC, 'grok')
+  ok('爆款分析请求也带 B（用户："生视频、爆款分析部分也一样"）', viralB.includes('执行 AI（B）：Grok（网页）'))
+  const videoB = exportsObj.internals.buildCopyRequest(['1'], '', '', PROC, 'chatgpt')
+  ok('生文案请求同样带 B 行', videoB.includes('执行 AI（B）：ChatGPT（网页）'))
+  // driver.md（C 的载体）带 B 署名 + 角色链说明
+  const docWithB = engineHost.driverDoc({ dir: 'D:/runs/grok-output/x', batchId: 'x', saveNonce: 'n'.repeat(64), entries: [{ index: 1, slug: 'a', prompt: 'p' }], grokUrl: 'https://grok.com/', createdAt: 'now', count: 1, executorAI: 'chatgpt' })
+  ok('driver.md 记 B 并给 browser_open 步骤', docWithB.includes('执行 AI（B）：ChatGPT（网页）') && docWithB.includes('browser_open(use:"edge", url:"https://chatgpt.com/")'))
+  ok('driver.md 写明 A/B/C/D/E 角色链', docWithB.includes('角色链') && docWithB.includes('image-prompt-director'))
+  const docSelf = engineHost.driverDoc({ dir: 'D:/runs/grok-output/y', batchId: 'y', saveNonce: 'n'.repeat(64), entries: [{ index: 1, slug: 'a', prompt: 'p' }], grokUrl: 'https://grok.com/', createdAt: 'now', count: 1 })
+  ok('老批次（无 executorAI 字段）仍按本会话渲染，行为不变', docSelf.includes('执行 AI（B）：本会话（默认）') && !docSelf.includes('先打开它的网页'))
+}
 
 // ── 3d. 来源文本（小说正文 / 章纲）─────────────────────────────────────────
 section('3d) 来源文本（按主要情节生图）')
@@ -340,35 +367,41 @@ React.useEffect = realUseEffect
 
 ok('渲染出面板容器', panelHtml.includes('dvp-panel'))
 ok('面板标题是「生图」不是「提示词」', panelHtml.includes('>生图<') && !panelHtml.includes('图片 / 视频提示词'))
-ok('面板里有「生图要求」区块', panelHtml.includes('生图要求'))
+// v0.8.0：「生图要求」改名「执行选择」并排到最后；档位三件仍在，引擎（D）是最后一个下拉。
+ok('面板里有「执行选择」区块', panelHtml.includes('执行选择'))
 ok('清晰度下拉渲染出来了', panelHtml.includes('清晰度') && panelHtml.includes('8K电影级+胶片颗粒'))
 ok('画幅下拉渲染出来了', panelHtml.includes('画幅') && panelHtml.includes('9:16 全竖'))
 ok('张数下拉渲染出来了', panelHtml.includes('每个提示词张数'))
 ok('清晰度档位按低到高渲染', panelHtml.indexOf('720p') < panelHtml.indexOf('1080p') && panelHtml.indexOf('1080p') < panelHtml.indexOf('2K'))
-// 三个生图要求 + 页内引擎 + 栏目条引擎 + 一个层数 = 6 个 select
-// （v0.7.0 加了「生图要求」里的「生图引擎」；v0.7.1 又在栏目条右侧留了一份，两处共用一个 state；
-//  原来还有一个「路径」下拉，v0.4.0 换成了顶部栏目条）
-ok('下拉都是 select 元素（原生控件，主题无关）', (panelHtml.match(/<select/g) || []).length === 6, panelHtml.match(/<select/g))
-ok('每个选项都渲染成 option', (panelHtml.match(/<option/g) || []).length >= 17, (panelHtml.match(/<option/g) || []).length)
+// 层数 + 三个生图档位 + 引擎 = 5 个 select（v0.7.1 的栏目条第二份引擎开关已删，v0.8.0）
+ok('下拉都是 select 元素（原生控件，主题无关）', (panelHtml.match(/<select/g) || []).length === 5, panelHtml.match(/<select/g))
+ok('每个选项都渲染成 option', (panelHtml.match(/<option/g) || []).length >= 16, (panelHtml.match(/<option/g) || []).length)
 ok('有扫描层数下拉（默认 4 层）', panelHtml.includes('层数') && panelHtml.includes('只看这一层') && panelHtml.includes('8 层'))
-// v0.4.0：顶部四个栏目取代原「路径」下拉（用户 2026-09-14：像会话区 对话/轨迹/费用 那样分栏）
-ok('顶部栏目条有生图/生文案/生视频/爆款分析四个', ['生图', '生文案', '生视频', '爆款分析'].every((t) => panelHtml.includes(t))
-  && (panelHtml.match(/role="tab"/g) || []).length === 4, (panelHtml.match(/role="tab"/g) || []).length)
-ok('默认停在「生图」栏目（主按钮随之是准备生图请求）', /data-dvp-tab="image"/.test(panelHtml) && panelHtml.includes('准备生图请求'))
-// v0.7.1：引擎开关在栏目条右侧也渲染一份（默认就停在生图栏目 ⇒ 静态渲染里应当正好一个），
-// 两个 select 各自从 IMAGE_ENGINES 生成 option ⇒ 「ChatGPT（Edge）」作为 option 文本正好出现两次
-// （label 的 title 里那份引擎清单也会带这个字面，所以按 option 文本数，别按裸字符串数）。
-ok('栏目条右侧也渲染了引擎下拉（不用滚到底也能换）', (panelHtml.match(/data-dvp-engine-top="1"/g) || []).length === 1)
-ok('两份引擎下拉都来自 IMAGE_ENGINES（没有第二份硬编码）', (panelHtml.match(/>ChatGPT（Edge）<\/option>/g) || []).length === 2, (panelHtml.match(/>ChatGPT（Edge）<\/option>/g) || []).length)
+// v0.8.0：栏目顺序 = 生文案 → 爆款分析 → 生图 → 生视频（用户："标签顺序应该是生文案→爆款分析→生图→生视频"）
+const tabOrder = [...panelHtml.matchAll(/role="tab" class="dvp-tab[^"]*" data-dvp-tab="([a-z]+)"/g)].map((m) => m[1])
+ok('四个栏目按新顺序渲染', tabOrder.join(',') === 'copy,viral,image,video', tabOrder)
+ok('默认停在「生图」栏目（主按钮随之是准备生图请求）', panelHtml.includes('data-dvp-tab="image"') && panelHtml.includes('准备生图请求'))
+// v0.8.0：栏目条右侧那份引擎快捷开关**删除**（引擎最后才选 ⇒ 它必须排在素材/来源文本之后）
+ok('栏目条不再挂引擎快捷开关（v0.7.1 补丁已撤）', !panelHtml.includes('data-dvp-engine-top'))
+ok('只渲染一份引擎下拉', (panelHtml.match(/data-dvp-engine="1"/g) || []).length === 1)
+ok('引擎下拉标着 D（生图引擎（D））', panelHtml.includes('生图引擎（D）'))
 ok('默认态主按钮是「准备生图请求」', panelHtml.includes('准备生图请求') && !panelHtml.includes('准备分析请求'))
 // v0.2.0（用户 2026-09-14 反馈）：主按钮只说它真正做的事 —— 把请求写进输入框、按 Enter 才开跑；
 // 面板底部另有独立的「清空草稿」入口（收起/关闭面板一律保留草稿，不再需要关闭确认框）。
 ok('主按钮不再叫「派发到会话 / 生成爆款元素」', !panelHtml.includes('派发到会话') && !panelHtml.includes('生成爆款元素'))
 ok('底部有「清空草稿」入口', panelHtml.includes('清空草稿'))
-// 素材分流三列：视频 / 图片 / 文档（用户报"识别不了 md"）
-ok('素材列表是视频/图片/文档三列', panelHtml.includes('dvp-cols') && (panelHtml.match(/dvp-col"/g) || []).length === 3, (panelHtml.match(/dvp-col"/g) || []).length)
+// 素材分流：v0.8.0「非常驻」——列跟着栏目走，默认生图栏目 = 图片 + 文档两列（视频不在这一栏分析）
+ok('生图栏目只列图片+文档两列', panelHtml.includes('dvp-cols') && (panelHtml.match(/dvp-col"/g) || []).length === 2, (panelHtml.match(/dvp-col"/g) || []).length)
+ok('列数由 data-dvp-cols 驱动（1/2/3 三档 CSS）', /\.dvp-cols\[data-dvp-cols="1"\]\{--dvp-col-n:1\}/.test(source)
+  && /\.dvp-cols\[data-dvp-cols="2"\]\{--dvp-col-n:2\}/.test(source) && /\.dvp-cols\[data-dvp-cols="3"\]\{--dvp-col-n:3\}/.test(source))
+ok('列容器把列数写进 DOM（data-dvp-cols）', /'data-dvp-cols': String\(tabKindsNow\.length\)/.test(source) || /'data-dvp-cols':/.test(source))
+ok('tabKinds 映射齐全（copy=[]、viral=视频+图、image=图+文档、video=视频）',
+  exportsObj.internals.tabKinds('copy').join(',') === ''
+  && exportsObj.internals.tabKinds('viral').join(',') === 'video,image'
+  && exportsObj.internals.tabKinds('image').join(',') === 'image,text'
+  && exportsObj.internals.tabKinds('video').join(',') === 'video')
 ok('文档列有独立的空态说明', panelHtml.includes('md / txt / srt'))
-ok('CSS 网格是 3 列', source.includes('.dvp-cols{display:grid;grid-template-columns:1fr 1fr 1fr'), '')
+ok('CSS 网格按列数变量排（repeat(var(--dvp-col-n,3),1fr)）', source.includes('.dvp-cols{display:grid;grid-template-columns:repeat(var(--dvp-col-n,3),1fr)'))
 ok('面板里有「来源文本」区块', panelHtml.includes('来源文本'))
 // 正文框默认收起（展开要占 64px+，窄屏会把底部按钮挤出面板），所以断言收起态的样子
 ok('来源文本默认收起（给展开按钮，不给正文框）', panelHtml.includes('展开正文') && !panelHtml.includes('<textarea'))
@@ -388,49 +421,73 @@ ok('本地挑文件夹带 webkitdirectory（含子目录）', source.includes("s
 ok('读文本有 FileReader 兜底', source.includes('function readTextFile(file)') && source.includes('readAsText'))
 ok('注释里留了 Electron 拒绝的原始报错，避免回退', source.includes('The request is not allowed by the user agent'))
 ok('取消选择不会把 Promise 挂死（cancel 事件）', source.includes("addEventListener('cancel'"))
-// 背后的 skill 逻辑大纲
-ok('有「背后的逻辑」区块', panelHtml.includes('背后的逻辑'))
-ok('大纲默认收起（只给「看大纲」按钮）', panelHtml.includes('看大纲'))
-// 大纲正文默认收起，渲染结果里看不到正文 —— 所以三条输入从源码断言
+// 背后的 skill 逻辑大纲（v0.8.0：搬进设置页，面板不再挂抽屉）
+ok('大纲条目挪到模块级并由 internals 导出', /var HOWTO_STEPS = \[/.test(source) && /HOWTO_STEPS: HOWTO_STEPS/.test(source))
+ok('面板不再渲染大纲抽屉/入口', !panelHtml.includes('背后的逻辑') && !source.includes('renderHowtoDrawer'))
+// 大纲正文默认不渲染，从源码断言内容仍在
 ok('大纲覆盖图片/视频/文章三条输入', source.includes('拿到图片') && source.includes('拿到视频') && source.includes('拿到文章/正文'))
 ok('大纲写了七段式与情节抽取规则', source.includes('七段式') && source.includes('主要情节') && source.includes('冲突'))
 ok('大纲新增爆款路径与过程目录两节', source.includes('爆款元素卡') && source.includes('viral-summary.md') && source.includes('过程目录'))
-// v0.3.0：大纲从「展成正文 + 把素材列表收掉」改成「中段抽屉盖上去」（用户 2026-09-14 反馈：
-// 展开说明就没法核对素材）。这几条锁死"素材列表不再被大纲分支掉"这个行为，防止改回去。
-ok('大纲是抽屉而不是让素材列表让位的分支', source.includes('dvp-drawer') && !source.includes("'dvp-body dvp-body-howto'"))
+ok('大纲有 A/B/C/D/E 角色链一节（v0.8.0）', source.includes('角色链 A/B/C/D/E') && source.includes('E=成图'))
+// v0.3.0 的"抽屉盖中段"约束随大纲搬走而失效；这几条守住"素材列表不被任何分支掉"。
 ok('layoutPanel 里没有 howto 特例分支了（isHowto 判定已删）', !/isHowto/.test(source))
-ok('生图要求 / 来源文本不再因大纲敞开而让位', !/\(howtoOpen \|\| isViral\) \? null/.test(source))
-ok('抽屉带独立关闭入口', /data-dvp-howto-drawer/.test(source) && /onClick: function \(\) \{ setHowtoOpen\(false\) \}/.test(source))
-ok('默认态里素材三列常驻（与大纲入口同屏）', panelHtml.includes('dvp-cols') && panelHtml.includes('看大纲'))
 // v0.5.0：发送前体积提示（请求字数 + 估算 token + 素材数 + "正文不进请求"）
 ok('页脚有体积提示位（sizeHint）', /function sizeHint\(\)/.test(source) && /h\('div', \{ className: 'dvp-hint' \}, sizeHint\(\)\)/.test(source))
-ok('体积提示用与派发同一批构建器算预览', /var requestPreview = useMemo\(/.test(source) && /buildDispatchRequest\(items, sourceDir\(\), runsRoot, ''\)/.test(source))
+ok('体积提示用与派发同一批构建器算预览（v0.8.0 带上 B）',
+  /var requestPreview = useMemo\(/.test(source)
+  && /buildDispatchRequest\(items, sourceDir\(\), runsRoot, '', executorAI\)/.test(source)
+  && /buildViralRequest\(items, sourceDir\(\), runsRoot, '', executorAI\)/.test(source)
+  && /buildCopyRequest\(copyBookList\(\), copyPrompt\.trim\(\), runsRoot, '', executorAI\)/.test(source))
 ok('token 只标估算（不装精确）', /token，估算/.test(source))
 ok('提示里写明正文只带路径与字数', /正文不进请求/.test(source))
-// v0.6.0：任务记录（人看的那份）—— 摘要表 + 点开按需拉产物文件
-ok('有任务记录区块与四列表头', /'data-dvp-runs': '1'/.test(source) && /时间 · 类型 · 项数 · 过程目录/.test(source))
+// v0.6.0：任务记录（人看的那份）—— v0.8.0 搬进**设置页**，面板不再渲染。
+ok('设置页有任务记录区块与四列表头', /'data-dvp-set-runs': '1'/.test(source) && /时间 · 类型 · 项数 · 过程目录/.test(source))
+ok('面板里不再有任务记录区块（渲染函数与 runs 状态都撤了）',
+  !/'data-dvp-runs': '1'/.test(source) && !/function renderRuns/.test(source) && !/var \[runs, setRuns\]/.test(source))
 ok('产物文件是按需拉取的（点开那一行才请求 /dvp/runs/files）',
   /function toggleRun\(run\)/.test(source) && /\/dvp\/runs\/files\?dir=/.test(source) && /if \(filesOf\[id\]\) return/.test(source))
-ok('给 AI 的历史走 format=md（最新一条展开）', /\/dvp\/runs\?format=md/.test(source) && /把历史写进输入框|复制给 AI/.test(source))
+ok('「接着做 / 请求给 AI」读过程目录的 request.md（原请求复放）', /request\.md/.test(source) && /function continueLastRun/.test(source) && /function copyLastRequest/.test(source))
+ok('四个派发构建器都要求把请求原文存进 request.md', (source.match(/存档要求：派发前把/g) || []).length === 4, (source.match(/存档要求：派发前把/g) || []).length)
 ok('摘要一次拉完且带刷新入口', /function loadRuns\(\)/.test(source) && /onClick: loadRuns/.test(source))
 // v0.4.0：素材行不再显示文件大小（用户 2026-09-14：名称/大小/时间三样里，大小没人看还占宽）
 ok('素材行不再推入文件大小', !/item\.bytes\) dim\.push\(formatBytes/.test(source) && !/dim\.push\(formatBytes/.test(source))
 // v0.4.0：三列各有自己的色条（video/image/text），一眼分得开
 ok('三列带 data-kind 区分', /'data-kind': kind/.test(source) && /\.dvp-col\[data-kind=video\]/.test(source)
   && /\.dvp-col\[data-kind=image\]/.test(source) && /\.dvp-col\[data-kind=text\]/.test(source))
-// v0.4.0：抽屉必须自己保证**读得清** —— 开壁纸时主题的 --dsw-alias-bg-* 全是半透明玻璃
-// （实测本机 0.05–0.17），只调颜色 alpha 没用，得靠 backdrop 模糊把底下的素材文字糊掉
-ok('抽屉带 backdrop 模糊 + 不透明化（主题色叠 12 层，用户要求"不要透明"）',
-  /\.dvp-drawer\{[^}]*backdrop-filter:blur\(/.test(source)
-  && /var DRAWER_LAYERS = new Array\(12\)/.test(source)
-  && /background-image:' \+ DRAWER_LAYERS/.test(source))
+// 抽屉的**可读性**约束在设置页不再适用（页面背景不是玻璃层），CSS 规则保留但面板已不渲染它。
+ok('（历史）抽屉 CSS 仍在样式表里（v0.8.0 起面板不再用它，仅存档）', /\.dvp-drawer\{[^}]*backdrop-filter:blur\(/.test(source))
+
+// ── 3h. 设置页（v0.8.0：任务记录 / A / B / 技能电池都在这页）────────────────
+section('3h) 设置页渲染')
+{
+  React.useEffect = () => {}
+  const settingsHtml = ReactDOMServer.renderToStaticMarkup(React.createElement(exportsObj.internals.SettingsPage, {}))
+  React.useEffect = realUseEffect
+  ok('设置页容器渲染', settingsHtml.includes('data-dvp-settings'))
+  ok('设置页有执行 AI（B）区块与下拉', settingsHtml.includes('data-dvp-set-executor') && settingsHtml.includes('data-dvp-executor') && settingsHtml.includes('本会话（默认）'))
+  ok('B 候选三条都在 option 里', ['self', 'grok', 'chatgpt'].every((v) => settingsHtml.includes('value="' + v + '"')))
+  ok('设置页有任务记录区块（刷新/复制给 AI/请求给 AI/接着做）', settingsHtml.includes('data-dvp-set-runs')
+    && settingsHtml.includes('复制给 AI') && settingsHtml.includes('请求给 AI') && settingsHtml.includes('接着做'))
+  ok('设置页有生图逻辑（A）区块与复制按钮', settingsHtml.includes('data-dvp-set-logic') && settingsHtml.includes('复制 A 全文') && settingsHtml.includes('image-prompt-director'))
+  ok('设置页有「背后的逻辑」大纲条目', settingsHtml.includes('背后的逻辑') && settingsHtml.includes('七段式'))
+  ok('设置页有技能电池格子区（含重扫按钮）', settingsHtml.includes('data-dvp-set-battery') && settingsHtml.includes('重扫技能包') && settingsHtml.includes('可拆卸'))
+  ok('设置页保留验收入口（预览页/state JSON）', settingsHtml.includes('/dvp/preview/') && settingsHtml.includes('/dvp/state'))
+  ok('宿主有 GET /dvp/director（A 正文来源）与 /dvp/skills、/dvp/skills/toggle', (function () {
+    const hostSrc = readFileSync(path.join(PKG, 'index.js'), 'utf8')
+    return hostSrc.includes("path: '/dvp/director'") && hostSrc.includes("path: '/dvp/skills'") && hostSrc.includes("path: '/dvp/skills/toggle'")
+  })())
+}
 ok('面板是**定高**（四个栏目总高一致、页脚钉底，切标签不上下跳）',
   /\.dvp-panel\{[^}]*height:min\(560px/.test(source) && /\.dvp-foot\{margin-top:auto/.test(source))
 ok('面板本身也带 backdrop 模糊', /\.dvp-panel\{[^}]*backdrop-filter:blur\(/.test(source))
-// v0.4.0：素材区紧跟"挑文件夹"行，生图要求/来源文本排在它下面
-ok('素材区排在挑文件夹行之后、生图要求之前',
+// v0.4.0：素材区紧跟"挑文件夹"行；v0.8.0：来源文本排在其后、「执行选择」（含引擎 D）永远最后
+ok('素材区排在挑文件夹行之后',
   source.indexOf('isCopy ? renderCopyFields() : renderMaterialBody()') > 0
-  && source.indexOf('isCopy ? renderCopyFields() : renderMaterialBody()') < source.indexOf("'生图要求'"))
+  && source.indexOf('isCopy ? renderCopyFields() : renderMaterialBody()') < source.indexOf("'执行选择'"))
+ok('「执行选择」排在来源文本之后（引擎最后才选，用户 2026-09-17）',
+  source.indexOf("'来源文本'") < source.indexOf("'执行选择'"))
+ok('引擎下拉在「执行选择」区块里、档位之后',
+  source.indexOf("'data-dvp-engine': '1'") > source.indexOf("'执行选择'"))
 // v0.4.0：输出/媒体文件夹都能用宿主的目录选择器（hsot 路由 /dvp/pick-dir）
 ok('产物目录与媒体文件夹都有「选文件夹…」', (source.match(/pickHostDir\(setRunsRoot\)/g) || []).length === 1
   && (source.match(/pickHostDir\(setFolder\)/g) || []).length === 1 && source.includes("'/dvp/pick-dir'"))
@@ -615,7 +672,7 @@ ok('webServer 缺失时只告警不抛错', warnings.some((w) => w.includes('web
 // ── 6. 技能包完整性 ────────────────────────────────────────────────────────
 section('6) 技能包')
 
-const expectSkills = ['video-prompt-pipeline', 'watch', 'oneshot-prompt-generator', 'prompt-videos', 'video-generation', 'viral-media-copywriter']
+const expectSkills = ['video-prompt-pipeline', 'watch', 'oneshot-prompt-generator', 'prompt-videos', 'video-generation', 'viral-media-copywriter', 'image-prompt-director']
 for (const skill of expectSkills) {
   const file = path.join(PKG, 'skills', skill, 'SKILL.md')
   let text = ''
@@ -649,7 +706,7 @@ section('6b) 宿主 frontmatter 解析（真的走 apply）')
   }
   await host.apply(ctx, { mediaRoot: PKG, runsRoot: PKG, registerSkills: true })
   const byName = new Map(captured.map((s) => [s.name, s]))
-  ok('注册到 6 个技能', captured.length === 6, captured.map((s) => s.name))
+  ok('注册到 7 个技能', captured.length === 7, captured.map((s) => s.name))
   for (const name of expectSkills) {
     const skill = byName.get(name)
     ok(`${name}: 描述长度正常（≥20 字）`, skill !== undefined && skill.description.length >= 20, skill && skill.description)
@@ -668,6 +725,11 @@ section('6b) 宿主 frontmatter 解析（真的走 apply）')
   ok('其 references/element-schema.md 与 output-contract.md 随包', ['references/element-schema.md', 'references/output-contract.md', 'references/domain-lenses.md', 'scripts/inventory_media.py']
     .every((rel) => existsSync(path.join(PKG, 'skills', 'viral-media-copywriter', ...rel.split('/')))))
   ok('四层抽象在其正文里', vmc !== undefined && vmc.content.includes('原子线索') && vmc.content.includes('可迁移配方'))
+  // v0.8.0：A（生图 Prompt 导演规则）作为第 7 块电池进包
+  const ipd = byName.get('image-prompt-director')
+  ok('image-prompt-director 注册且 resourceBase 指真目录', ipd !== undefined && ipd.resourceBase && existsSync(ipd.resourceBase.path))
+  ok('A 正文含爆款钩子库与六类构图模式', ipd !== undefined && ipd.content.includes('爆款钩子库') && ipd.content.includes('对比双拼') && ipd.content.includes('aspect ratio'))
+  ok('A 正文含负面词内嵌口径（Avoid:）', ipd !== undefined && ipd.content.includes('Avoid:'))
   // 上游包没有 watch 的 UTF-8 修复 —— 合并时不许丢（已修坑 3）
   const framesSrc = readFileSync(path.join(PKG, 'skills', 'watch', 'scripts', 'frames.py'), 'utf8')
   const whisperSrc = readFileSync(path.join(PKG, 'skills', 'watch', 'scripts', 'whisper.py'), 'utf8')
@@ -683,6 +745,15 @@ section('6c) 技能包热重扫')
   ok('reload 路由存在且只认 POST/PUT', hostSrc.includes("path: '/dvp/skills/reload'"))
   ok('reload 如实播报 first-wins 边界', hostSrc.includes('first-wins') && hostSrc.includes('重启桌面端'))
   ok('设置页有「重扫技能包」按钮', source.includes('重扫技能包') && source.includes('/dvp/skills/reload'))
+  // v0.8.0：电池插拔路由与运行期名单
+  {
+    const hostSrc = readFileSync(path.join(PKG, 'index.js'), 'utf8')
+    ok('注册跳过 disabledSkills 名单（开机就认电池）', /disabled\.has\(skill\.name\)/.test(hostSrc) && /runtime\.disabledSkills/.test(hostSrc))
+    ok('toggle 只认本包 skills/ 里的名字', hostSrc.includes('不认识的技能名') && hostSrc.includes("path: '/dvp/skills/toggle'"))
+    ok('toggle 把 dispose 真调掉（从目录摘除，不是只记名单）', /const off = skillDisposers\.get\(target\)/.test(hostSrc) && /off\(\)/.test(hostSrc))
+    ok('装回时若 dispose 在手则立刻重注册', /reregisteredNow/.test(hostSrc) && /await registerSkillPack\(\)\s*\n\s*reregisteredNow = true/.test(hostSrc))
+    ok('reload 响应带 battery 清单', /battery: await listSkillBattery\(\)/.test(hostSrc))
+  }
 }
 
 // ── 7. Grok 批次工具 ───────────────────────────────────────────────────────
@@ -727,6 +798,11 @@ ok('配方提到 browser_open 与 Edge', recipe.includes('browser_open') && reci
 ok('配方要求停止而不是绕过人机验证', recipe.includes('人机验证') && recipe.includes('不要尝试绕过'))
 ok('配方里每条都有粘贴、等待、取图三步', recipe.includes('3.1 把第 1 条提示词') && recipe.includes('3.1b 等待出图') && recipe.includes('3.1c 取图') && recipe.includes('3.2 把第 2 条提示词'))
 ok('配方禁止改账号设置', recipe.includes('不要修改用户的账号设置'))
+// v0.8.0：B=本会话（默认）时配方与旧版逐字一致（没有"先去 B 的页面"这一步）
+ok('配方默认不含 B 的跳转步骤（B=本会话时行为不变）', !recipe.includes('0. browser_open') && recipe.startsWith('1. browser_open'))
+const recipeWithB = shot.grokRecipe(parsed, 'D:/runs/grok-output', 'b-1', 'n'.repeat(64), 'chatgpt')
+ok('配方：B 选了网页家就多一步先切到它的页面', recipeWithB.startsWith('0. browser_open(use:"edge", url:"https://chatgpt.com/")') && recipeWithB.includes('执行 AI（B）'))
+ok('配方：第 0 步之后仍照旧先开 Grok', recipeWithB.includes('\n1. browser_open(use:"edge", url:"https://grok.com/")'))
 
 const tmpOut = path.join(PKG, 'tools', '.tmp-grok-test')
 const saved = await shot.saveImage(tmpOut, parsed[0], Buffer.from('89504e470d0a1a0a', 'hex'))
@@ -753,6 +829,14 @@ ok('驱动清单给出 Download 收件补救路径', driverText.includes('watch-
 ok('驱动清单写明签名 URL 直连不可用', driverText.includes('403') && driverText.includes('CORS'))
 ok('驱动清单要求核对 ledger', driverText.includes('ledger.json'))
 ok('驱动清单为每条列出落盘文件名', driverText.includes('01-01-men-lang.<ext>') && driverText.includes('02-02-chui-mou.<ext>'))
+// v0.8.0：回填重写的 driver.md 也要跟宿主同口径（B 署名 + 角色链 + B 的跳转步骤）
+ok('驱动清单写明执行 AI（B）与角色链', driverText.includes('执行 AI（B）：本会话（默认）') && driverText.includes('角色链'))
+ok('驱动清单：B=本会话时不给"先去它的页面"这一步', !driverText.includes('0. `browser_open(use:"edge", url:"https://chatgpt.com/")'))
+const driverWithB = backfill.renderDriverDoc({ ...fakePlan, dir: 'D:/runs/grok-output', executorAI: 'chatgpt' })
+ok('驱动清单：B 选了网页家就先切到它的页面（第 0 步）',
+  driverWithB.includes('执行 AI（B）：ChatGPT（网页）') && driverWithB.includes('0. `browser_open(use:"edge", url:"https://chatgpt.com/")`')
+  && driverWithB.includes('\n1. `browser_open(use:"edge", url:"https://grok.com/")`'))
+ok('驱动清单：脏 B 值退本会话（不写脏名字）', backfill.renderDriverDoc({ ...fakePlan, dir: 'D:/runs/grok-output', executorAI: 'gpt-4o' }).includes('执行 AI（B）：本会话（默认）'))
 
 // 回填真实配对：文档 4 条对批次 4 条
 if (existsSync(realDoc) && existsSync(planFile)) {
@@ -820,6 +904,7 @@ console.log('\n— 面板草稿（内存，不写磁盘）—')
   // ── 生文案栏目（v0.4.0）：请求构建器 + 栏目到宿主状态的映射 ──────────────
   const copyReq = it.buildCopyRequest(['7143039', 'https://fanqienovel.com/page/710000'], '男频爽文向，前 3 秒钩子要狠', 'D:/runs', 'D:/runs/process/x')
   ok('生文案请求列出全部书单', copyReq.includes('7143039') && copyReq.includes('fanqienovel.com/page/710000') && copyReq.includes('书单（2 本）'))
+  ok('生文案默认带 B=self 行（v0.8.0）', copyReq.includes('执行 AI（B）：本会话'))
   ok('生文案要求只读免费章节、不许绕过付费', copyReq.includes('只读免费章节') && copyReq.includes('不要尝试任何绕过手段'))
   ok('生文案把用户提示词原样带进去', copyReq.includes('男频爽文向，前 3 秒钩子要狠'))
   ok('生文案指了 book-material-copy 技能并留了兜底', copyReq.includes('book-material-copy') && copyReq.includes('没注册就按上面的口径'))
@@ -829,7 +914,7 @@ console.log('\n— 面板草稿（内存，不写磁盘）—')
   ok('栏目 ⇒ 宿主状态：生图/生视频=prompt，爆款分析=viral，生文案=不写（null）',
     it.tabToPipelineMode('image') === 'prompt' && it.tabToPipelineMode('video') === 'prompt'
     && it.tabToPipelineMode('viral') === 'viral' && it.tabToPipelineMode('copy') === null)
-  ok('四个栏目 id 齐全', it.PANEL_TABS.map((x) => x.id).join(',') === 'image,copy,video,viral')
+  ok('四个栏目 id 按 v0.8.0 顺序', it.PANEL_TABS.map((x) => x.id).join(',') === 'copy,viral,image,video')
   // 重扫不该把用户改过的勾选冲成"全勾"：草稿里记过的按草稿，新冒出来的按默认勾上
   const merged = it.mergeSelection(['D:/m/a.png', 'D:/m/b.png', 'D:/m/new.png'], { 'D:/m/a.png': false, 'D:/m/b.png': true })
   ok('重扫后：用户取消过的仍未勾选', merged['D:/m/a.png'] === false)

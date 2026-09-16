@@ -1,5 +1,63 @@
 # 变更记录
 
+## 0.8.0 — 2026-09-17 · 角色链 A→B→C→D→E、面板非常驻化、任务记录与生图逻辑搬进设置页、技能电池
+
+**需求原话**（用户）：
+
+> "生图插件需要修改：图生图或者视频生图的时候才显示所选文件夹里需要分析的图或视频，不能是常驻，
+> 然后是任务记录和生图逻辑放入设置页，而不是对话页，再就是生图引擎应该是最后才选择，同理，
+> 生视频、爆款分析部分也一样。然后是标签顺序应该是生文案→爆款分析→生图→生视频。"
+
+> "附件是用 GPT（无关 grok）生图的提示词，先定义 ABCDE（A 是给生图 AI 的 Prompt，B 是执行 AI，
+> C 是生图 Prompt，D 是生图 AI，E 是生图 AI 生出的图），附件给的是 A，现有可选生图引擎是 D，
+> 之前是将 B 内嵌进你本身，现在需要新加，不填就默认还是你，然后生成 C 之后再丢给所给的引擎，
+> 最后回收 E 到标签页所选的文件夹内。"
+
+> "目前生视频的 D 先放着，然后 B 如果选了也需要对应跳转网页。然后具体的 skill 要能在设置页里找到对应，
+> 变成个可拆卸的电池一样，剩下的没问题了，可以继续"
+
+**角色链落地**：A = 导演规则（新技能 `image-prompt-director`，正文就是附件那份
+《海外网文封面 Prompt 导演·爆款增强版》，设置页可读、`GET /dvp/director` 可读）→ B = 执行 AI
+（新选项 `executorAI`：本会话（默认）/ Grok 网页 / ChatGPT 网页；选了网页就在驱动配方里**第 0 步先开它的页面**）
+→ C = 生图提示词（落 `driver.md`）→ D = 生图引擎（`IMAGE_ENGINES`，仍是最后才选）→ E = 成图回收进
+`<runsRoot>\grok-output\<batchId>\`。生视频/爆款分析今天没有产出媒体的 D，所以它们的最后一个可选项就是 B。
+
+**做了什么**（`index.js` / `client.js`）：
+
+- **非常驻素材列**：`tabKinds(id)` 把栏目映射成素材种类 —— 生文案 `[]`、爆款分析 视频+图、
+  生图 图+文档、生视频 视频；列数由 `data-dvp-cols` 驱动 CSS（1/2/3 档），不再常驻三列。
+- **栏目顺序** `PANEL_TABS` = 生文案 → 爆款分析 → 生图 → 生视频（默认仍停在「生图」）。
+- **引擎（D）最后才选**：v0.7.1 那个栏目条右侧的引擎快捷开关**删除**（它是补丁，代价是把引擎顶到最上面）；
+  面板最后一栏是「执行选择」= B 状态行 → 生图档位 → D 引擎下拉。
+- **任务记录 / 生图逻辑整块搬进设置页**：面板不再持有 runs 状态、不再打开时拉 `/dvp/runs`；
+  设置页「图片 / 视频提示词」卡片分 `data-dvp-set-executor` / `-runs` / `-logic` / `-howto` / `-battery` / `-preview` 六块。
+- **B 的宿主侧**：`EXECUTOR_AIS` / `EXECUTOR_AI_DEFAULT='self'` / `normalizeExecutorAI`（脏值退 self）；
+  `/dvp/state` GET/PUT 带上 `executorAI`，PUT 显式传未知值 400、建批次时静默退 self；
+  `executorAI` 写进 `plan.json`、由 `/dvp/grok/plan` 回包、`driverDoc()` 写成 `- 执行 AI（B）：…` + 角色链 A=…E=，
+  B≠self 时多一步 `0. browser_open(use:"edge", url:"<B url>")`；`backfill-plan.mjs` 与 `grok-shot.mjs`
+  跟进同一口径（第 0 步编号固定为 `0.`，常规步骤仍从 `1.` 起）。
+- **技能电池**：设置页把 7 个技能列成可拆电池 —— 「拔掉」= 当场 `dispose()` 并记进 `state.json.disabledSkills`
+  （重启不自己装回），「装回」= 句柄在手时立刻重注册（回包给 `reregisteredNow`），否则提示「重扫技能包」；
+  新增 `GET /dvp/skills`、`POST /dvp/skills/toggle`、`POST /dvp/skills/reload`、`GET /dvp/director`（路由 17 → 21 条）。
+- **派发请求**：四种请求都写明 `执行 AI（B）：…` 与 `- 存档要求：派发前把**这份请求原文**一字不差写进
+  <processDir>\request.md`（设置页的「接着做」据此能还原原始请求）。
+
+**测试**：`selfcheck` 304 → **352** 项（+48：B 候选与角色链、driver.md 的 B 行与第 0 步、
+所有请求都带 B、引擎只有一份下拉、技能电池与 `/dvp/director`、栏目顺序与 `tabKinds`、`data-dvp-cols` 三档、
+任务记录/大纲不再出现在面板）；`probe-host` 208 → **247** 项（+39：`/dvp/state` 的 `executorAI` 与 7 技能清单、
+`/dvp/skills*` 插拔、`/dvp/director` 正文、B 落盘与脏值退默认、driver.md 的第 0 步与角色链、非法 B 退 self）；
+`verify-grok-bytes` 224 → **227** 项；`verify-watch-idle` 18 项不变。本机四套全绿
+（352 + 247 + 227 + 18 = 844 项）。
+
+**验收**：`node tools/selfcheck.mjs` / `probe-host.mjs` / `verify-grok-bytes.mjs` / `verify-watch-idle.mjs`
+各自输出 `全部通过：N 项检查`（run-all 在受限沙箱里因管道 stdio 被拒，故逐套直跑）。
+面板与设置页的真实渲染由 selfcheck 的 React SSR 段覆盖（栏目顺序、`data-dvp-cols`、引擎只有一份、B 状态行）。
+`servable/client.js` 已 `sync-servable` 同步（sha256 一致，selfcheck 3f 守着）。
+
+**回退**：`git revert <本次 commit>`。面板回到 v0.7.1 形态（三列常驻、引擎快捷开关在栏目条右侧、
+任务记录与生图逻辑在面板），`state.json` 里新增的 `executorAI` / `disabledSkills` 是纯增量键，
+旧代码读到时忽略它们即可。
+
 ## 0.7.1 — 2026-09-16 · 引擎开关挪到栏目条右侧（"没有 ChatGPT 选项"其实是没滚到底）
 
 **需求原话**（用户）："怎么没有写入笔记里，然后是还需要加一个用 edge 的 ChatGPT 生图选项"。

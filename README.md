@@ -6,10 +6,20 @@
 （v0.7.0：Grok / ChatGPT·Edge 二选一）出图；
 新路径把视频/图片蒸馏成可复用的**爆款元素**。也可以粘小说正文按情节出图。
 
+> **v0.8.0 的三件事**：
+> ① **角色链 A→B→C→D→E 全部可选**：A = 生图 Prompt 导演规则（技能 `image-prompt-director`，
+> 正文可在设置页里读）· B = **执行 AI**（默认还是本会话，也可选 Grok/ChatGPT 网页，选网页就先去它的页面
+> 把 C 写出来）· C = 生图提示词 · D = **生图引擎**（面板最后一个选项）· E = 成图回收进批次目录。
+> ② **引擎最后才选**：生图/生视频/爆款三处的「执行 AI（B）」都在引擎之前，
+> 生视频与爆款分析没有 D（不产媒体），最后一项就到 B 为止。
+> ③ **设置页 vs 对话页分了家**：面板只留"派发"要用的东西（目录、勾选、来源文本、执行选择、引擎）；
+> **任务记录**、**生图逻辑（A 的正文 + 规则大纲）**、**技能电池**、验收入口都挪到设置页那一栏。
+> 栏目顺序也按用户口径改成 **生文案 → 爆款分析 → 生图 → 生视频**（默认仍停在「生图」）。
+
 ```
 对话框旁：  [ ▷ PPT ]  [ ▷ 生图 ]          ← 本插件新增的是右边这个
 输入条右侧：[ 生图 ]                       ← 有对话时的常驻入口
-设置页：    生图（含验收用的组件预览页入口）
+设置页：    图片 / 视频提示词（执行 AI、任务记录、生图逻辑、技能电池、验收）
 ```
 
 面板里的区块：**路径二选一 → 媒体目录 + 层数 / 产物目录 → 生图要求（可选项）→ 来源文本 →
@@ -17,21 +27,26 @@
 
 ## 路径（二选一）
 
-面板**最上方是栏目条**（v0.4.0，像会话区的「对话 / 轨迹 / 费用」），四个栏目各管一件事：
+面板**最上方是栏目条**（v0.4.0，像会话区的「对话 / 轨迹 / 费用」），四个栏目各管一件事。
+**顺序按用户口径（v0.8.0）：生文案 → 爆款分析 → 生图 → 生视频**，默认停在「生图」：
 
 | 栏目 | 主按钮 | 干什么 |
 | --- | --- | --- |
-| 生图（默认） | 准备生图请求 / 用「生图引擎」生图 | 素材 → 提示词 → 图片可再走**面板上选的引擎**出图（v0.7.0：Grok / ChatGPT·Edge）；明确要参考图时走 video-prompt-pipeline 的 Phase 3（浏览器 ChatGPT 出首帧+关键帧两张图） |
-| 生文案（v0.4.0） | 准备文案请求 | 书单（书 ID / 链接）+ 文案要求 → 请求交给 agent：用浏览器工具**只读免费章节**（要你的登录态）当材料，按你给的提示词出投放文案；可用时优先走 `book-material-copy` 技能 |
-| 生视频（v0.4.0） | 准备视频请求 | 只算勾选的**视频**素材：出时间码分镜式视频提示词 |
-| 爆款分析 | 准备分析请求 | 底座是本包自带的 `viral-media-copywriter`（通用爆款素材模型）：清点去重 → 逐素材取证 → 四层抽象 → 每份素材一张《爆款元素卡》+ 汇总创意基因报告 `viral-summary.md` |
+| 生文案 | 准备文案请求 | 书单（书 ID / 链接）+ 文案要求 → 请求交给 agent：用浏览器工具**只读免费章节**（要你的登录态）当材料，按你给的提示词出投放文案；可用时优先走 `book-material-copy` 技能 |
+| 爆款分析 | 准备分析请求 | 底座是本包自带的 `viral-media-copywriter`（通用爆款素材模型）：清点去重 → 逐素材取证 → 四层抽象 → 每份素材一张《爆款元素卡》+ 汇总创意基因报告 `viral-summary.md`。最后一项是**执行 AI（B）**（没有 D：这一步不产媒体） |
+| 生图（默认） | 准备生图请求 / 用「生图引擎」生图 | 素材 → 提示词 → 图片可再走**面板上选的引擎**出图（v0.7.0：Grok / ChatGPT·Edge）；明确要参考图时走 video-prompt-pipeline 的 Phase 3（浏览器 ChatGPT 出首帧+关键帧两张图）。选项顺序 v0.8.0：先执行 AI（B），**最后才是生图引擎（D）** |
+| 生视频 | 准备视频请求 | 只算勾选的**视频**素材：出时间码分镜式视频提示词。最后一项同样是**执行 AI（B）**（v0.8.0 起生视频的 D 先放着，不选引擎） |
 
 栏目到宿主状态的映射：生图/生视频 ⇒ `pipelineMode=prompt`，爆款分析 ⇒ `viral`；
 生文案是**纯前端栏目**（宿主不认识这个值，故不写 state）。
 
-版面顺序（v0.4.0 按用户要求排）：栏目条 → 挑文件夹（媒体目录 + 扫描 + 层数 + 选文件夹…）
-→ 产物目录（+ 选文件夹…）→ **素材三列**（视频 / 图片 / 文档，各带一条 3px 色条：蓝 / 绿 / 琥珀）
-→ 生图要求 → 来源文本 → 背后的逻辑（抽屉）。
+**素材列跟随栏目变宽窄**（v0.8.0）：生图 = 图 + 文档 2 列、爆款分析 = 视频 + 图 2 列、
+生视频 = 视频 1 列，由容器上的 `data-dvp-cols` 驱动 CSS 的 `--dvp-col-n`。
+
+版面顺序（v0.8.0）：栏目条 → 媒体目录行 → 产物目录行 → **素材列**（按栏目取 1~3 列，
+各带一条 3px 色条：蓝 / 绿 / 琥珀）→ 来源文本 → **执行选择**（B 的状态 + 去设置页改 B +
+引擎（D）+ 生图档位，全在最后）→ 底部按钮。
+**任务记录与生图逻辑不在对话页**（v0.8.0）：它们是设置页的两块，面板里只留派发要用的东西。
 
 > 主按钮只做"**把请求准备进输入框**"（先建过程目录，再写文本），**任务不会自动开始** ——
 > 按 Enter 才发送（v0.2.0 起因：旧名「派发到会话 / 生成爆款元素」被读成"点完就开跑"）。
@@ -61,21 +76,28 @@
 `grok-output/` 成图）分开。`POST /dvp/run` 的运行目录也改用同一套时间命名。
 派发请求里写明过程目录路径，agent 照着落盘；建目录失败不拦派发（只是请求里少这一行）。
 
-## 生图要求（可选项）
+## 执行选择（B 在前、D 最后）
 
-四组下拉，默认值就是"什么都不用改也能跑"，值会随 `PUT /dvp/state` 记住。
-**引擎那个下拉有两个位置**（v0.7.1）：这份「生图要求」里一个，面板顶部栏目条右侧再放一个
-（`data-dvp-engine-top`，只在生图栏目出现）—— 面板是一整列滚动的，「生图要求」在文件列表下面，
-不滚到底就看不见引擎选项。两处共用同一个 state，改哪边都同步，页脚按钮跟着变。
+面板最后一栏叫「执行选择」（v0.8.0）：先一行**执行 AI（B）**的状态
+（+「复制 B 站点」+「去设置页改 B」），再是**引擎（D）**与三组生图档位。
+默认值就是"什么都不用改也能跑"，档位与引擎随 `PUT /dvp/state` 记住。
+B 是**在设置页改**的（面板只显示状态，避免同一个开关出现在两处，v0.7.1 的重复引擎下拉就是这么删的）。
 
 | 选项 | 默认 | 档位 |
 | --- | --- | --- |
-| 生图引擎（v0.7.0；v0.7.1 起栏目条右侧也有一个） | `grok` | Grok / ChatGPT（Edge） |
+| 执行 AI（B）（v0.8.0） | `本会话（默认）` | 本会话 / Grok（网页）/ ChatGPT（网页） |
+| 生图引擎（D）（v0.7.0；v0.8.0 起是最后一项、且只剩这一处） | `grok` | Grok / ChatGPT（Edge） |
 | 清晰度 | `1080p` | **720p** / 1080p / 2K / 4K / 8K / 8K电影级+胶片颗粒 |
 | 画幅 | `2:3 竖版` | 2:3 / 3:4 / 9:16 / 1:1 / 16:9 / 3:2 |
 | 每个提示词张数 | `1` | 1 / 2 / 4 |
 
-**引擎是唯一决定"去哪出图、驱动请求打开哪个站点"的开关**（v0.7.0）：选 `ChatGPT（Edge）` 时，
+**执行 AI（B）决定"C 由谁写"**（v0.8.0）：不填 / 选「本会话」= 旧行为（agent 自己按 A 出 C，
+不跳页面）；选 `Grok（网页）`/`ChatGPT（网页）` 时，驱动请求会在第 0 步先
+`browser_open(use:"edge", url:"<B 的网址>")`，把 A 的导演规则与素材要点交给它写出 C，再照旧去 D 出图。
+B 记在 `plan.json.executorAI` 与 `/dvp/state` 里（脏值落盘前退 `self`，不会写进驱动请求）。
+生视频与爆款分析**没有 D**（不产媒体），它们的最后一项就是 B。
+
+**引擎（D）是唯一决定"去哪出图、驱动请求打开哪个站点"的开关**（v0.7.0）：选 `ChatGPT（Edge）` 时，
 驱动请求里的每一步都换成 `browser_open(use:"edge", url:"https://chatgpt.com")` + 贴进 ChatGPT 输入框，
 选 `grok` 时就是 `grok.com`。批次**建的时候绑定引擎，之后改不动**（在 `plan.json` 里），
 换引擎要新建批次；用错家的页面去存图会被 403 拒（见「四道门」里的门①b）。
@@ -134,9 +156,10 @@
 同一次修复：`GET /dvp/file` 的路径围栏原来只对着 `mediaRoot` 解析，
 **产物目录里的 md 会误报"越界"** —— 「按路径加」加不了章纲就是这个原因，已改为对所有允许根生效。
 
-## 背后的逻辑（面板里的用法说明）
+## 生图逻辑（v0.8.0：在设置页里看）
 
-面板里「背后的逻辑 → 看大纲」是一份内置说明，写的就是取素材、抽情节、出提示词的规则（初版）：
+设置页「图片 / 视频提示词」卡片里的**生图逻辑**一块就是这份内置说明，写的是取素材、抽情节、出提示词的规则
+（v0.8.0 从面板抽屉挪到设置页；面板不再挂它，省得派发时还得分心滚过一段长文）：
 
 - **图片** → 抽主体外观 / 服装配饰 / 动作表情 / 场景 / 光线 / 构图镜头 / 色调风格，落成七段式提示词；
 - **视频** → 按 `video-prompt-pipeline` 先 `watch` 抽帧拿字幕，记录镜头边界与时间码、动作与状态变化、
@@ -147,9 +170,9 @@
   出元素卡与创意基因报告，学机制不抄原句；
 - 另有「合成一版」「画幅与清晰度」「过程目录」「产物与对账」四节。
 
-**大纲展开不再藏素材列表**（v0.3.0）：它是盖在中段上的一层**抽屉**（自带滚动、不参与面板
-高度计算），素材列表原地不动、勾选不丢，关掉立即回原样；底部按钮位置不受影响。
-内容原文见 `client.js` 的 `HOWTO_STEPS` + `renderHowtoDrawer()`。
+**大纲展开不再藏素材列表**（v0.3.0 起是抽屉，v0.8.0 起整块搬去设置页）：面板与设置页各管各的，
+改素材勾选不会被一段长说明顶下去。内容原文见 `client.js` 的 `HOWTO_STEPS`（+ 设置页的 `renderHowtoHead()`，
+v0.8.0 删掉了面板里的 `renderHowtoDrawer()`）。
 
 同一份大纲也出成了 6 页 PPT 便于评审：`生图-背后的-skill-逻辑-初版/生图-skill逻辑大纲-v1.pptx`
 （PPTD 工程同目录；改完跑 `pptd_check` + `pptd_render`）。
@@ -161,7 +184,10 @@
 | --- | --- |
 | 对话框旁模式按钮 + 抽屉面板（扫描、分流、勾选、派发） | `client.js` → 槽 `conversation.hero.modeActions` |
 | 输入条右侧常驻 chip（同一面板） | `client.js` → 槽 `conversation.input.right` |
-| 设置页卡片 + `/dvp/preview/` 组件预览页 | `client.js` → 槽 `settings.section` |
+| 设置页卡片（执行 AI / 任务记录 / 生图逻辑 / 技能电池）+ `/dvp/preview/` 组件预览页 | `client.js` → 槽 `settings.section`（v0.8.0：任务记录、生图逻辑从面板搬来这里） |
+| 执行 AI（B）的候选表（本会话 / Grok / ChatGPT，选网页就先去它的页面） | `client.js` + `index.js` → `EXECUTOR_AIS`、`normalizeExecutorAI`、`plan.json.executorAI` |
+| A 的正文（导演规则）读写：技能 `image-prompt-director` | `skills/image-prompt-director/SKILL.md` + `index.js` → `GET /dvp/director` |
+| 技能电池：拔掉 / 装回单个技能包（写 `disabledSkills`） | `client.js` 设置页 + `index.js` → `GET /dvp/skills`、`POST /dvp/skills/toggle`、`POST /dvp/skills/reload` |
 | 媒体目录扫描、图片字节、文本读取、逐项状态、运行目录 | `index.js` → `/dvp/scan`、`/dvp/image`、`/dvp/file`、`/dvp/manifest`、`/dvp/run` |
 | 生图要求（引擎/清晰度/画幅/张数）的清洗、落档、进驱动清单 | `index.js` → `sanitizeGrokOptions` + `normalizeImageEngine` + `/dvp/state`、`/dvp/grok/plan` |
 | 引擎注册表（站点 / 称呼 / 驱动话术）+ 按 Origin 反查引擎 | `index.js` → `IMAGE_ENGINES`、`engineForOrigin` |
@@ -171,31 +197,38 @@
 | 派发历史按任务 ID 追加去重（保留最近 30 条） | `index.js` → `mergeRunHistory()` + `/dvp/manifest` |
 | 过程目录：按执行时间（年-月-日_时分）建目录、预置 frames/爆款元素 | `index.js` → `/dvp/process` |
 | 来源文本（免费章节/章纲）落盘 | `index.js` → `/dvp/source`、`/dvp/grok/plan` |
-| 注册 6 个技能到全局技能目录 | `index.js` → `ctx.skills.register` |
+| 注册 7 个技能到全局技能目录 | `index.js` → `ctx.skills.register` |
 | 技能包热重扫（开机后新增的技能免重启注册；设置页有按钮） | `index.js` → `/dvp/skills/reload` |
 | Grok / ChatGPT 出图批次落盘 + 图片字节保存 | `index.js` → `/dvp/grok/plan`、`/dvp/grok/save` |
 | 批次解析 / 命名 / 驱动配方 / 落盘 | `tools/grok-shot.mjs` |
-| 把已产出的提示词回填进批次 | `tools/backfill-plan.mjs` |
+| 把已产出的提示词回填进批次（重写的 `driver.md` 与宿主同口径：B + 角色链 + B 的跳转步） | `tools/backfill-plan.mjs` |
 | 接住浏览器下载的成图并自动改名写账 | `tools/watch-downloads.mjs` |
 | 从浏览器缓存捞回已显示的成图（兜底通道） | `tools/scan-cache.mjs` |
 | 把包根 `client.js` 同步到预览页那一份 | `tools/sync-servable.mjs` |
-| 离线自检（300 项） | `tools/selfcheck.mjs` |
-| 宿主路由集成测试（208 项，真 HTTP + 临时 fixture） | `tools/probe-host.mjs` |
+| 离线自检（352 项） | `tools/selfcheck.mjs` |
+| 宿主路由集成测试（247 项，真 HTTP + 临时 fixture） | `tools/probe-host.mjs` |
 | 收图守护的空闲退出判据测试（18 项，假钟快进） | `tools/verify-watch-idle.mjs` |
+| 存图四道门 / 字节校验测试（227 项） | `tools/verify-grok-bytes.mjs` |
 | 真实媒体目录扫描测试（24 项，只读你的实际目录） | `tools/probe-live.mjs` |
 
-## 注册进技能目录的 6 个技能
+## 注册进技能目录的 7 个技能
 
 `video-prompt-pipeline`（视频复刻 · 编排入口）、`watch`（抽帧/字幕）、`oneshot-prompt-generator`（反推规范）、
 `prompt-videos`（视频提示词）、`video-generation`（结构化 JSON + 可选生成）、
-`viral-media-copywriter`（通用爆款素材模型 —— 爆款元素路径的底座：清点脚本 + 元素 schema + 领域镜头 + 输出协议）。
+`viral-media-copywriter`（通用爆款素材模型 —— 爆款元素路径的底座：清点脚本 + 元素 schema + 领域镜头 + 输出协议）、
+**`image-prompt-director`（v0.8.0 新增：角色链里的 A —— 生图 Prompt 导演规则，正文就是用户给的
+《海外网文封面 Prompt 导演·爆款增强版》，设置页「生图逻辑」一块能读到、`GET /dvp/director` 也能读）**。
 它们的 `resourceBase` 指向本包 `skills/<name>/`，所以 agent 读 `references/`、`scripts/` 的路径是通的。
+
+**技能电池（v0.8.0）**：设置页把每个技能列成一块可拆的电池 —— 「拔掉」= 当场 `dispose()` 并记进
+`state.json.disabledSkills`（重启也不会自己装回来），「装回」= 立刻重注册（句柄在手时同步生效，
+响应里的 `reregisteredNow` 会说明；否则提示点「重扫技能包」）。改技能**正文**仍需重启（first-wins）。
 
 ### 2026-09-11 三个上游包的合并台账（择优录取）
 
 | 来源 | 处置 |
 | --- | --- |
-| `viral-media-copywriter.zip` | **整包入库**为第 6 个技能（SKILL.md + 3 references + inventory_media.py，原样未改） |
+| `viral-media-copywriter.zip` | **整包入库**为第 6 个技能（SKILL.md + 3 references + inventory_media.py，原样未改）；v0.8.0 新增 `image-prompt-director` 后技能总数 7 |
 | `video-prompt-pipeline-video-fuke.zip` | `video-prompt-pipeline/SKILL.md` 的 **Phase 3「两张浏览器 ChatGPT 参考图」全流程并入**本地版；frontmatter 取 fuke 的中文「视频复刻」定位；`agents/openai.yaml` 取 fuke 版（2img 是英文占位 stub） |
 | `video-prompt-pipeline-complete-chatgpt-2-images.zip` | 与 fuke 逐字节同（只 frontmatter 语言/openai.yaml 两处分叉），作为 fuke 的对照件归档 |
 | 两包内的 `watch/*.py` | **拒收**——上游版没有本包的 6 处 UTF-8 修复（已修坑 3，中文 Windows 必崩），维持本地版；selfcheck 6b 有"4+2 处修复不许丢"的断言守着 |
@@ -205,7 +238,7 @@
 **认面板的过程目录约定**（面板派发 → 过程目录收中间产物；独立使用 → workspace 的 `video-prompt-runs\`）。
 
 技能目录在**开机时**扫描注册；`skills/` 里新增技能后不必再重启 ——
-设置页「生图」卡片的**「重扫技能包」**按钮（或 `POST /dvp/skills/reload`）会把新名字当场注册上。
+设置页「图片 / 视频提示词」卡片的**「重扫技能包」**按钮（或 `POST /dvp/skills/reload`）会把新名字当场注册上。
 注意 dsh-skill 对同名 runtime 技能是 **first-wins**：reload 只补新名字，**改已有技能的正文仍需重启**
 （响应里会如实区分 `added` / `alreadyRegistered`）。
 
@@ -236,8 +269,8 @@ CI 用 Node 20/22/24 三档矩阵、windows-latest。
 | `tools/verify-watch-idle.mjs` | 18 项通过 |
 | `tools/selfcheck.mjs` | 237 项通过 |
 
-v0.7.0 本机 `node tools/run-all.mjs`：**4/4 套件通过** —— `probe-host` 208 项 /
-`verify-watch-idle` 18 项 / `verify-grok-bytes` 224 项 / `selfcheck` 300 项，
+v0.8.0 本机 `node tools/run-all.mjs`：**4/4 套件通过** —— `probe-host` 247 项 /
+`verify-watch-idle` 18 项 / `verify-grok-bytes` 227 项 / `selfcheck` 352 项，
 未纳入 CI 的仍只有 `probe-live.mjs`。
 
 > `selfcheck.mjs` 原来因为"用 `createRequire` 从**本机 DSH 安装目录**解析 `react`/`react-dom`"被排除。
@@ -429,9 +462,9 @@ curl -X POST http://127.0.0.1:<端口>/dvp/grok/run -H 'Content-Type: applicatio
 ## 自检
 
 ```bash
-node tools/selfcheck.mjs        # 300 项：静态契约、纯函数、槽注册、面板渲染、布局分配、技能包、热重扫、本地文件读取、镜像一致性、引擎可选
-node tools/probe-host.mjs       # 208 项：把 apply() 挂到真 node:http 上，打真 /dvp/* 路由（临时 fixture）
-node tools/verify-grok-bytes.mjs # 224 项：字节不进会话 + 四道门（含引擎门）+ 统一任务记录（状态/续跑/取消/只读）
+node tools/selfcheck.mjs        # 352 项：静态契约、纯函数、槽注册、面板渲染、布局分配、技能包、技能电池、热重扫、本地文件读取、镜像一致性、引擎可选、执行 AI（B）与角色链
+node tools/probe-host.mjs       # 247 项：把 apply() 挂到真 node:http 上，打真 /dvp/* 路由（临时 fixture）
+node tools/verify-grok-bytes.mjs # 227 项：字节不进会话 + 四道门（含引擎门）+ 统一任务记录（状态/续跑/取消/只读）
 node tools/probe-live.mjs       # 24 项：对真实媒体根目录跑扫描/分流/状态/生图产物核对（只读）
 node tools/sync-servable.mjs    # 改完 client.js 后同步预览页那一份（不跑就地同步会被 3f 断言拦住）
 ```

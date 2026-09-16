@@ -27,6 +27,10 @@ function parseArgs(argv) {
   return args
 }
 
+/** 执行 AI（B）的站点。与宿主 index.js 的 EXECUTOR_AIS 同形（这里只用到 url，故不 import 宿主）。 */
+const EXECUTOR_URLS = { self: '', grok: 'https://grok.com/', chatgpt: 'https://chatgpt.com/' }
+const EXECUTOR_LABELS = { self: '本会话（默认）', grok: 'Grok（网页）', chatgpt: 'ChatGPT（网页）' }
+
 /** 渲染驱动清单。与宿主 index.js 的 driverDoc 同形，但这里带真提示词与 Download 收件步骤。 */
 export function renderDriverDoc(plan) {
   const lines = []
@@ -37,17 +41,32 @@ export function renderDriverDoc(plan) {
   lines.push('- 目标站点：' + (plan.grokUrl || 'https://grok.com/'))
   lines.push('- 批次条数：' + (plan.count || (plan.entries || []).length))
   lines.push('- 图片落地：' + (plan.dir || ''))
+  const execAI = Object.prototype.hasOwnProperty.call(EXECUTOR_URLS, plan.executorAI) ? plan.executorAI : 'self'
+  lines.push('- 执行 AI（B）：' + (EXECUTOR_LABELS[execAI] || EXECUTOR_LABELS.self)
+    + (EXECUTOR_URLS[execAI] ? ' —— 提示词（C）由它按 A 的导演规则产出；打开：' + EXECUTOR_URLS[execAI] : ''))
+  lines.push('- 角色链：A=导演规则（技能 image-prompt-director）· B=执行 AI · C=生图提示词 · D=生图引擎 · E=成图回收进本批次目录')
   lines.push('')
   lines.push('## 执行方式')
   lines.push('')
   lines.push('由会话里的 agent 用浏览器插件驱动用户的 Edge：')
   lines.push('')
-  lines.push('1. `browser_open(use:"edge", url:"' + (plan.grokUrl || 'https://grok.com/') + '")` —— 走用户登录态。')
-  lines.push('2. 未登录 / 出现人机验证 / 额度用尽时**停下来叫人**，不允许绕过。')
-  lines.push('3. 逐条把下面提示词贴进 Grok 输入框并点 Submit。')
-  lines.push('4. **等流式输出收尾**（`Stop model response` 消失、出现 `Download`/`Make video` 工具条）再去取图；')
+  let step = 0
+  const nextStep = () => {
+    step += 1
+    return step + '. '
+  }
+  // v0.8.0：B 选了网页家就多一步"先切到它的页面"（不切页面 B 拿不到活）。
+  // 固定用 0. 编号（与宿主 driverDoc 同形），后面的常规步骤照旧从 1. 起。
+  if (EXECUTOR_URLS[execAI]) {
+    lines.push('0. `browser_open(use:"edge", url:"' + EXECUTOR_URLS[execAI] + '")` —— 先把**执行 AI（B）**的页面打开，'
+      + '把 A 的导演规则与素材要点交给它，由它写出下面每条提示词（C）。')
+  }
+  lines.push(nextStep() + '`browser_open(use:"edge", url:"' + (plan.grokUrl || 'https://grok.com/') + '")` —— 走用户登录态。')
+  lines.push(nextStep() + '未登录 / 出现人机验证 / 额度用尽时**停下来叫人**，不允许绕过。')
+  lines.push(nextStep() + '逐条把下面提示词贴进 Grok 输入框并点 Submit。')
+  lines.push(nextStep() + '**等流式输出收尾**（`Stop model response` 消失、出现 `Download`/`Make video` 工具条）再去取图；')
   lines.push('   生成中取到的是占位图。单条超时 120 秒记失败并继续。')
-  lines.push('5. 取图只能发生在已登录的页面上下文里（签名 URL 换 node 直连是 403，canvas 被 CORS 污染）。')
+  lines.push(nextStep() + '取图只能发生在已登录的页面上下文里（签名 URL 换 node 直连是 403，canvas 被 CORS 污染）。')
   lines.push('   首选通道：页面内 fetch 成 arrayBuffer 后把字节**原样** `POST /dvp/grok/save?index=<序号>&slug=<slug>&batch=<批次ID>'
     + (plan.saveNonce ? '&nonce=' + plan.saveNonce : '') + '`')
   lines.push('   （raw bytes；宿主回 {file,bytes,sha256,width,height} 元信息即落盘成功）。')
@@ -56,7 +75,7 @@ export function renderDriverDoc(plan) {
   lines.push('   拿不到字节时的兜底只能盘到盘：`node tools/scan-cache.mjs --bytes <体积> --out <本目录>` 从浏览器缓存直接捞，')
   lines.push('   或请用户在真实浏览器里点一次 Download，然后用')
   lines.push('   `node tools/watch-downloads.mjs --out <本目录>` 接住并自动改名写账。')
-  lines.push('6. 全部投完核对 `ledger.json`：成功几张、失败几张、失败原因（对账只用 file/bytes/sha256，不回读图片内容）。')
+  lines.push(nextStep() + '全部投完核对 `ledger.json`：成功几张、失败几张、失败原因（对账只用 file/bytes/sha256，不回读图片内容）。')
   lines.push('')
   lines.push('## 提示词清单')
   lines.push('')

@@ -118,10 +118,19 @@ const fakePicker = {
   },
 }
 const skillRegistrations = []
+// 假 services 层也照真契约走：dispose 一调，技能就从在册清单里消失（拔电池要在 /dvp/state 上看得见）。
+// registerCounts 记累计注册次数（不因 dispose 减少），用来验证"装回时确实重新 register 了一遍"。
+const registerCounts = {}
+const disposed = []
 const fakeSkills = {
   register(skill) {
     skillRegistrations.push(skill)
-    return () => {}
+    registerCounts[skill.name] = (registerCounts[skill.name] || 0) + 1
+    return () => {
+      disposed.push(skill.name)
+      const index = skillRegistrations.indexOf(skill)
+      if (index >= 0) skillRegistrations.splice(index, 1)
+    }
   },
   async list() {
     return skillRegistrations.map((s) => ({ name: s.name, provider: s.provider }))
@@ -173,8 +182,8 @@ const FIXED_STAMP = '2026-01-01_1000'
 
 console.log('\n1) apply() 挂在真 HTTP 服务上')
 await host.apply(fakeCtx, { mediaRoot: MEDIA, runsRoot: RUNS, registerSkills: true })
-ok('注册了 18 条路由', routes.length === 18, routes.map((r) => r.kind + ' ' + r.path))
-for (const expected of ['/dvp/scan', '/dvp/pick-dir', '/dvp/runs', '/dvp/runs/files', '/dvp/file', '/dvp/image', '/dvp/probe', '/dvp/state', '/dvp/manifest', '/dvp/run', '/dvp/process', '/dvp/source', '/dvp/grok/plan', '/dvp/grok/save', '/dvp/grok/run', '/dvp/grok/runs', '/dvp/skills/reload']) {
+ok('注册了 21 条路由', routes.length === 21, routes.map((r) => r.kind + ' ' + r.path))
+for (const expected of ['/dvp/scan', '/dvp/pick-dir', '/dvp/runs', '/dvp/runs/files', '/dvp/file', '/dvp/image', '/dvp/probe', '/dvp/state', '/dvp/manifest', '/dvp/run', '/dvp/process', '/dvp/source', '/dvp/grok/plan', '/dvp/grok/save', '/dvp/grok/run', '/dvp/grok/runs', '/dvp/skills/reload', '/dvp/skills', '/dvp/skills/toggle', '/dvp/director']) {
   ok('路由存在 ' + expected, routes.some((r) => r.path === expected), routes.map((r) => r.path))
 }
 
@@ -391,6 +400,46 @@ ok('driver.md 指向来源文本文件', driverText.includes(plan.sourceFile))
 const planOnDisk = JSON.parse(await fsp.readFile(plan.planFile, 'utf8'))
 ok('plan.json 里只有来源文件路径、没有正文', typeof planOnDisk.sourceFile === 'string' && planOnDisk.sourceFile !== '' && planOnDisk.source === undefined, Object.keys(planOnDisk))
 
+// v0.8.0：派发时选的执行 AI（B）要跟着批次落盘 —— 重试/接着做时才知道 C 该交给谁
+const planExecB = await (await fetch(BASE + '/dvp/grok/plan', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    grokUrl: 'https://grok.com/',
+    slug: 'b-exec',
+    executorAI: 'grok',
+    entries: [{ index: 1, title: 'B 行', slug: 'b-line', prompt: '一张封面……' }],
+  }),
+})).json()
+ok('批次落盘成功（B=grok）', planExecB.ok === true, planExecB)
+const planExecBOnDisk = JSON.parse(await fsp.readFile(planExecB.planFile, 'utf8'))
+ok('plan.json 记住执行 AI（B）（回包与盘上一致）', planExecB.executorAI === 'grok' && planExecBOnDisk.executorAI === 'grok', [planExecB.executorAI, planExecBOnDisk.executorAI])
+ok('盘上的 plan.json 也有 executorAI（重试读的是这个文件）', planExecBOnDisk.executorAI === 'grok', planExecBOnDisk.executorAI)
+const driverExecB = await fsp.readFile(planExecB.driverFile, 'utf8')
+ok('driver.md 写明执行 AI（B）与 A–E 角色链', driverExecB.includes('执行 AI（B）：Grok（网页）') && driverExecB.includes('角色链')
+  && ['A=', 'B=', 'C=', 'D=', 'E='].every((k) => driverExecB.includes(k)), driverExecB.slice(0, 300))
+ok('driver.md 第 0 步就切到 B 的网页（不切页面就拿不到 C）', /0\.\s*`?browser_open\(use:"edge", url:"https:\/\/grok\.com\/"\)/.test(driverExecB), (driverExecB.match(/0\.[^\n]{0,120}/) || [])[0])
+// B=self（默认）时不该有"先打开它的网页"这一步：默认就是本会话，行为与 v0.7.x 一致
+const planSelfExecB = await (await fetch(BASE + '/dvp/grok/plan', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ grokUrl: 'https://grok.com/', slug: 'b-self', entries: [{ index: 1, title: '默认 B', slug: 'b-self', prompt: 'p' }] }),
+})).json()
+const driverSelfExecB = await fsp.readFile(planSelfExecB.driverFile, 'utf8')
+ok('不传 B 时 plan.json 与回包都记 self（默认值落盘，不是 undefined）', planSelfExecB.executorAI === 'self'
+  && JSON.parse(await fsp.readFile(planSelfExecB.planFile, 'utf8')).executorAI === 'self', planSelfExecB.executorAI)
+ok('B=self 的 driver.md 没有"先打开它的网页"步骤（默认行为不变）', driverSelfExecB.includes('执行 AI（B）：本会话')
+  && !driverSelfExecB.includes('0. `browser_open'), (driverSelfExecB.match(/执行 AI[^\n]{0,60}/) || [])[0])
+// 非法 B 不许静默写脏值：进批次时退默认 self
+const planExecBBad = await (await fetch(BASE + '/dvp/grok/plan', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ grokUrl: 'https://grok.com/', slug: 'b-dirty', executorAI: 'gpt-4o', entries: [{ index: 1, title: '脏 B', slug: 'b-dirty', prompt: 'p' }] }),
+})).json()
+ok('非法 B 值进批次时退默认 self（不写脏值）', planExecBBad.executorAI === 'self'
+  && JSON.parse(await fsp.readFile(planExecBBad.planFile, 'utf8')).executorAI === 'self', planExecBBad.executorAI)
+ok('没传 executorAI 的老调用方照常出批次（向后兼容）', planExecBBad.ok === true && existsSync(planExecBBad.driverFile))
+
 // ── 8b. 来源文本单独落盘 ────────────────────────────────────────────────────
 console.log('\n8b) /dvp/source · 来源文本落盘')
 const srcPut = await (await fetch(BASE + '/dvp/source', {
@@ -410,7 +459,7 @@ ok('批次响应带 saveNonce（存图要用的那把钥匙）', typeof plan.sav
 const save1 = await (await fetch(BASE + '/dvp/grok/save', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ index: 1, slug: 'men-lang', base64: 'data:image/png;base64,' + PNG_1x1.toString('base64'), note: 'probe', nonce: plan.saveNonce }),
+  body: JSON.stringify({ batch: plan.batchId, index: 1, slug: 'men-lang', base64: 'data:image/png;base64,' + PNG_1x1.toString('base64'), note: 'probe', nonce: plan.saveNonce }),
 })).json()
 ok('base64 图片保存成功', save1.ok === true && save1.bytes === PNG_1x1.length, save1)
 ok('文件名按序号+slug 命名', save1.ok && path.basename(save1.file) === '01-men-lang.png', save1.file)
@@ -573,7 +622,8 @@ ok('索引缺失时新建批次照常', newAfterIndexLoss.ok === true && existsS
 console.log('\n9) /dvp/state · 配置与技能清单')
 const stateGet = await (await fetch(BASE + '/dvp/state')).json()
 ok('返回默认目录', stateGet.ok === true && stateGet.defaults.mediaRoot === MEDIA, stateGet.defaults)
-ok('返回技能清单', Array.isArray(stateGet.skills) && stateGet.skills.length === 6, stateGet.skills)
+ok('返回技能清单（v0.8.0 起 7 个，含 A 规则）', Array.isArray(stateGet.skills) && stateGet.skills.length === 7
+  && stateGet.skills.includes('image-prompt-director'), stateGet.skills)
 const statePut = await (await fetch(BASE + '/dvp/state', {
   method: 'PUT',
   headers: { 'Content-Type': 'application/json' },
@@ -617,6 +667,33 @@ const statePutModeBad = await (await fetch(BASE + '/dvp/state', {
 })).json()
 ok('非法路径值不覆盖已存档', statePutModeBad.ok === true && statePutModeBad.state.pipelineMode === 'viral', statePutModeBad.state && statePutModeBad.state.pipelineMode)
 
+// v0.8.0：执行 AI（B）也要能存能读，非法值退默认 self 而不是写脏值
+ok('默认执行 AI（B）是本会话', stateGet.executorAI === 'self' && stateGet.state.executorAI === 'self', [stateGet.executorAI, stateGet.state && stateGet.state.executorAI])
+const statePutB = await (await fetch(BASE + '/dvp/state', {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ executorAI: 'chatgpt' }),
+})).json()
+ok('执行 AI（B）能存进 state', statePutB.ok === true && statePutB.state.executorAI === 'chatgpt', statePutB.state && statePutB.state.executorAI)
+const stateGetB = await (await fetch(BASE + '/dvp/state')).json()
+ok('执行 AI（B）重新读回还是它', stateGetB.state.executorAI === 'chatgpt', stateGetB.state && stateGetB.state.executorAI)
+const statePutBBad = await fetch(BASE + '/dvp/state', {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ executorAI: 'claude' }),
+})
+ok('不认识的执行 AI → 400（不静默写成半截值）', statePutBBad.status === 400, statePutBBad.status)
+const stateGetBBad = await (await fetch(BASE + '/dvp/state')).json()
+ok('非法值被拒后原值没被动', stateGetBBad.state.executorAI === 'chatgpt', stateGetBBad.state && stateGetBBad.state.executorAI)
+const statePutBNull = await (await fetch(BASE + '/dvp/state', {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ executorAI: null }),
+})).json()
+ok('null 是"清空回默认"：盘上不留 executorAI: null', statePutBNull.ok === true && statePutBNull.state.executorAI === 'self', statePutBNull.state && statePutBNull.state.executorAI)
+const stateFileB = JSON.parse(await fsp.readFile(path.join(TMP, 'dsh-video-prompt', 'state.json'), 'utf8'))
+ok('清空后 state.json 里真的没有 executorAI 键', stateFileB.executorAI === undefined, stateFileB.executorAI)
+
 // ── 10. 静态预览 ────────────────────────────────────────────────────────────
 console.log('\n10) /dvp/preview · 静态预览页')
 const preview = await fetch(BASE + '/dvp/preview/')
@@ -631,9 +708,9 @@ ok('预览路径不能穿越（403/404）', escape.status === 403 || escape.stat
 
 // ── 11. 技能注册 ────────────────────────────────────────────────────────────
 console.log('\n11) ctx.skills.register · 技能注册内容')
-ok('注册了 6 个技能', skillRegistrations.length === 6, skillRegistrations.map((s) => s.name))
+ok('注册了 7 个技能', skillRegistrations.length === 7, skillRegistrations.map((s) => s.name))
 const names = skillRegistrations.map((s) => s.name).sort()
-ok('技能名齐全', JSON.stringify(names) === JSON.stringify(['oneshot-prompt-generator', 'prompt-videos', 'video-generation', 'video-prompt-pipeline', 'viral-media-copywriter', 'watch']), names)
+ok('技能名齐全', JSON.stringify(names) === JSON.stringify(['image-prompt-director', 'oneshot-prompt-generator', 'prompt-videos', 'video-generation', 'video-prompt-pipeline', 'viral-media-copywriter', 'watch']), names)
 ok('provider 标记为本插件', skillRegistrations.every((s) => s.provider === 'dsh-video-prompt'))
 ok('resourceBase 指向包内真目录', skillRegistrations.every((s) => s.resourceBase && existsSync(s.resourceBase.path)), skillRegistrations.map((s) => s.resourceBase && s.resourceBase.path))
 ok('正文非空且不含 frontmatter', skillRegistrations.every((s) => s.content.length > 200 && !s.content.startsWith('---')), skillRegistrations.map((s) => s.content.length))
@@ -645,6 +722,11 @@ ok('video-prompt-pipeline 是「视频复刻」版且含 Phase 3 参考图流程
 const vmc = skillRegistrations.find((s) => s.name === 'viral-media-copywriter')
 ok('viral-media-copywriter（爆款素材模型）随包注册', vmc !== undefined && vmc.content.includes('原子线索') && vmc.content.includes('inventory_media.py'), vmc && vmc.content.length)
 ok('其 references/scripts 相对 resourceBase 是通的', vmc !== undefined && vmc.resourceBase && existsSync(path.join(vmc.resourceBase.path, 'references', 'element-schema.md')) && existsSync(path.join(vmc.resourceBase.path, 'scripts', 'inventory_media.py')))
+// v0.8.0：A（生图 Prompt 导演规则）作为第 7 块电池随包注册 —— 用户附件正文原样进 SKILL.md
+const ipd = skillRegistrations.find((s) => s.name === 'image-prompt-director')
+ok('image-prompt-director（A 规则）随包注册', ipd !== undefined && ipd.content.includes('爆款钩子库') && ipd.content.includes('对比双拼'), ipd && ipd.content.length)
+ok('A 的 description 是拼好的一句话（不是块标量记号）', ipd !== undefined && !ipd.description.startsWith('>') && ipd.description.length > 40, ipd && ipd.description)
+ok('A 不许被误当"摘要版"截断（正文 ≥ 9000 字符）', ipd !== undefined && ipd.content.length >= 9000, ipd && ipd.content.length)
 
 // ── 12. 技能包热重扫（开机后新增技能免重启）─────────────────────────────────
 console.log('\n12) /dvp/skills/reload · 技能包热重扫')
@@ -652,10 +734,43 @@ const reloadGet = await fetch(BASE + '/dvp/skills/reload')
 ok('GET 拒绝（405）', reloadGet.status === 405, reloadGet.status)
 const reloaded = await (await fetch(BASE + '/dvp/skills/reload', { method: 'POST' })).json()
 ok('重扫成功', reloaded.ok === true, reloaded)
-ok('全部 6 个已在册 → added 为空', Array.isArray(reloaded.added) && reloaded.added.length === 0 && (reloaded.alreadyRegistered || []).length === 6, reloaded)
+ok('全部 7 个已在册 → added 为空', Array.isArray(reloaded.added) && reloaded.added.length === 0 && (reloaded.alreadyRegistered || []).length === 7, reloaded)
 ok('回包带 first-wins 说明', typeof reloaded.note === 'string' && reloaded.note.includes('重启'), reloaded.note)
-// 假技能服务不做 first-wins，重复 register 会多记；真服务里这一步只是 no-op。
-ok('重扫确实重新走了一遍注册（假服务计数 ×2）', skillRegistrations.length === 12, skillRegistrations.length)
+// v0.8.0：registerSkillPack 记住了自己发出去的 dispose 句柄 ⇒ 重扫不会重复注册（早先会 ×2 多记一批）
+ok('重扫不重复注册（在册的不再 register 第二遍）', skillRegistrations.length === 7, skillRegistrations.length)
+ok('重扫回包带电池清单（设置页插拔要用）', Array.isArray(reloaded.battery) && reloaded.battery.length === 7
+  && reloaded.battery.every((b) => typeof b.name === 'string' && typeof b.installed === 'boolean' && b.canToggle === true), reloaded.battery && reloaded.battery.length)
+
+// ─ 12b. /dvp/skills · 电池清单与插拔（v0.8.0：技能=可拆卸电池）────────────
+console.log('\n12b) /dvp/skills · 电池清单与插拔')
+const batteryGet = await (await fetch(BASE + '/dvp/skills')).json()
+ok('GET /dvp/skills 返回 7 块电池', batteryGet.ok === true && Array.isArray(batteryGet.battery) && batteryGet.battery.length === 7, batteryGet.battery && batteryGet.battery.length)
+ok('每块电池带 name/description/installed/canToggle', batteryGet.battery.every((b) => typeof b.name === 'string' && typeof b.description === 'string'
+  && typeof b.installed === 'boolean' && b.canToggle === true), batteryGet.battery[0])
+const toggleBad = await fetch(BASE + '/dvp/skills/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'no-such-skill', installed: false }) })
+ok('拔掉不认识的技能名 → 400（只认本包 skills/ 里的）', toggleBad.status === 400, toggleBad.status)
+const off = await (await fetch(BASE + '/dvp/skills/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'watch', installed: false }) })).json()
+ok('拔掉 watch：响应里它标成未安装', off.ok === true && off.battery.find((b) => b.name === 'watch').installed === false, off.battery && off.battery.filter((b) => !b.installed).map((b) => b.name))
+ok('拔掉 watch：dispose 真被调用（从技能目录摘除，不是只记名单）', disposed.includes('watch'), disposed)
+ok('拔掉 watch：回包标明这次是真摘除（unhooked=true）', off.unhooked === true, off.unhooked)
+const stateAfterOff = await (await fetch(BASE + '/dvp/state')).json()
+ok('拔掉 watch：/dvp/state 的技能清单里也没有它', !stateAfterOff.skills.includes('watch'), stateAfterOff.skills)
+const offFile = JSON.parse(await fsp.readFile(path.join(TMP, 'dsh-video-prompt', 'state.json'), 'utf8'))
+ok('拔掉 watch：disabledSkills 落进 state.json（重启后仍拔着）', Array.isArray(offFile.disabledSkills) && offFile.disabledSkills.includes('watch'), offFile.disabledSkills)
+const on = await (await fetch(BASE + '/dvp/skills/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'watch', installed: true }) })).json()
+ok('装回 watch：响应里它标成已安装', on.ok === true && on.battery.find((b) => b.name === 'watch').installed === true, on.battery && on.battery.filter((b) => !b.installed).map((b) => b.name))
+ok('装回 watch：句柄在手 ⇒ 立刻重注册，无需重扫', on.reregisteredNow === true && registerCounts.watch === 2, [on.reregisteredNow, registerCounts.watch])
+const onFile = JSON.parse(await fsp.readFile(path.join(TMP, 'dsh-video-prompt', 'state.json'), 'utf8'))
+ok('装回 watch：disabledSkills 名单里清掉了它', !(onFile.disabledSkills || []).includes('watch'), onFile.disabledSkills)
+ok('插拔不改别的电池（其余 6 块仍在册）', on.battery.filter((b) => b.installed).length === 7, on.battery.filter((b) => b.installed).map((b) => b.name))
+
+// ── 12c. /dvp/director · A（生图 Prompt 导演规则）正文 ─────────────────────
+console.log('\n12c) /dvp/director · A 正文')
+const director = await (await fetch(BASE + '/dvp/director')).json()
+ok('GET /dvp/director 取到 A 正文', director.ok === true && typeof director.text === 'string' && director.text.length > 9000, director.chars)
+ok('A 正文不含 frontmatter（给面板看的是裸正文）', !director.text.startsWith('---') && !director.text.includes('when_to_use') && director.fileChars > director.chars, [director.fileChars, director.chars])
+ok('A 正文带爆款钩子库与构图模式（附件原文）', director.text.includes('爆款钩子库') && director.text.includes('构图模式') && director.text.includes('aspect ratio'))
+ok('A 回包带路径与字符数（对账用）', typeof director.path === 'string' && director.path.endsWith('SKILL.md') && director.chars === director.text.length, director.path)
 
 // ── 13. 局部保存设置不能丢掉未提交字段（P2：只改流水线模式就把两个根清空）──────
 console.log('\n13) /dvp/state · 只提交一个字段不覆盖别的字段')

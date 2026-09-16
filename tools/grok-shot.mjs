@@ -164,12 +164,21 @@ export function extFromContentType(contentType, fallback = '.png') {
  *     旧版"宿主不可用就把 base64 分块交回会话再写盘"的兜底已于 2026-09-15 删除，
  *     兜底改为盘到盘通道直接落批次目录，会话里只走"路径 + 字节数 + 哈希 + 状态"。
  */
-export function grokRecipe(entries, outDir, batchId = '', saveNonce = '') {
+/** 执行 AI（B）的站点。与宿主 index.js 的 EXECUTOR_AIS 同形（这里只用 url）。B=本会话 ⇒ 空串。 */
+const EXECUTOR_URLS = { self: '', grok: 'https://grok.com/', chatgpt: 'https://chatgpt.com/' }
+export function grokRecipe(entries, outDir, batchId = '', saveNonce = '', executorAI = 'self') {
   const batchDir = batchId === '' ? outDir : outDir + '/' + batchId
-  const steps = [
+  const execUrl = EXECUTOR_URLS[executorAI] || ''
+  const steps = []
+  // v0.8.0：执行 AI（B）选了网页家时，第 0 步先切到它的页面 —— C（提示词）由 B 按 A 的规则产出，
+  // 不切页面它拿不到活。B=本会话（默认）时这一步不存在，配方与旧版逐字一致。
+  if (execUrl) {
+    steps.push('0. browser_open(use:"edge", url:"' + execUrl + '") —— 先把**执行 AI（B）**的页面打开：把 A 的导演规则（技能 image-prompt-director）与素材要点交给它，由它写出下面每条提示词（C）。')
+  }
+  steps.push(
     '1. browser_open(use:"edge", url:"https://grok.com/") —— 用用户的 Edge 登录态；若未登录或出现人机验证，停下来叫人，不要尝试绕过。',
     '2. browser_snapshot —— 找到输入框（Grok 的 composer，contenteditable 或 textarea）。',
-  ]
+  )
   entries.forEach((entry, i) => {
     const name = String(entry.index).padStart(2, '0') + '-' + entry.slug
     steps.push(
@@ -234,14 +243,17 @@ async function main() {
     // 所以钥匙从批次目录的 plan.json 里读 —— 读了就把它写进取图命令，agent 照抄即可。
     // 读不到（还没建批次 / 旧批次没有这个字段）就留空，配方里也不会出现 nonce 字样。
     let saveNonce = ''
+    let executorAI = 'self'
     const planFileInBatch = path.join(outDir, 'plan.json')
     if (existsSync(planFileInBatch)) {
       try {
         const parsed = JSON.parse(await fsp.readFile(planFileInBatch, 'utf8'))
         if (parsed !== null && typeof parsed.saveNonce === 'string') saveNonce = parsed.saveNonce
+        // 执行 AI（B）同理从盘上读：面板建批次时把它记进 plan.json，这里照抄，就不要另加 CLI 参数了。
+        if (parsed !== null && typeof parsed.executorAI === 'string') executorAI = parsed.executorAI
       } catch { /* plan.json 坏了不影响出配方 */ }
     }
-    console.log('\n──── 给浏览器插件的操作清单 ────\n' + grokRecipe(entries, outDir, args.batch, saveNonce))
+    console.log('\n──── 给浏览器插件的操作清单 ────\n' + grokRecipe(entries, outDir, args.batch, saveNonce, executorAI))
   }
 }
 

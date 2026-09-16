@@ -255,6 +255,20 @@ ok('engine=chatgpt 但 grokUrl 是 grok.com ⇒ 400（不建半套批次）', ur
 // 门②：建批次时宿主发下来的 nonce（存图必须带上它）。本节后面的正常路径全用它。
 const SAVE_NONCE = typeof batch.body.saveNonce === 'string' ? batch.body.saveNonce : ''
 ok('批次响应带 saveNonce（存图那把钥匙，长度 ≥ 32）', SAVE_NONCE.length >= 32, SAVE_NONCE.length)
+// v0.8.0：执行 AI（B）跟引擎同一口径 —— 不传就默认 self（老调用方行为一字不变），
+// 盘上记死它，续做/重试时以盘上那份为准（换 B 要新建批次）。
+ok('不传执行 AI（B）的批次默认 self（老调用方行为不变）', batch.body.executorAI === 'self', batch.body.executorAI)
+const planOnDiskExec = JSON.parse(await fsp.readFile(path.join(MEDIA, 'grok-output', batchId, 'plan.json'), 'utf8'))
+ok('plan.json 记下 executorAI=self（这批的 C 由谁写，重试读的是盘上这份）', planOnDiskExec.executorAI === 'self', planOnDiskExec.executorAI)
+const badExec = await fetch(BASE + '/dvp/grok/plan', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json; charset=utf-8' },
+  body: JSON.stringify({ slug: 'verify-exec-bad', executorAI: 'gpt-4o', entries: [{ title: 'x', prompt: 'y' }] }),
+}).then(async (r) => ({ status: r.status, body: await r.json() }))
+ok('执行 AI（B）给个不认识的值 ⇒ 退默认 self（不写脏值、不静默丢批次）',
+  badExec.status === 200 && badExec.body.executorAI === 'self'
+    && JSON.parse(await fsp.readFile(path.join(MEDIA, 'grok-output', badExec.body.batchId, 'plan.json'), 'utf8')).executorAI === 'self',
+  badExec.body.executorAI)
 
 // 2a. 新路径：请求体就是图字节本身
 const postRaw = (bytes, qs, contentType = 'image/png', headers = {}) => fetch(BASE + '/dvp/grok/save?' + qs, {

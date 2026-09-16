@@ -55,16 +55,22 @@ window.__ModuleLoader__.load({
     ]
 
     // 面板最上方的栏目条（v0.4.0，用户 2026-09-14）：像会话区「对话 / 轨迹 / 费用」那样一排，
-    // 把四件事分开 —— 生图 / 生文案 / 生视频 / 爆款分析。
+    // 把四件事分开。顺序 v0.8.0 定为 **生文案 → 爆款分析 → 生图 → 生视频**
+    // （用户 2026-09-17："标签顺序应该是生文案→爆款分析→生图→生视频"）。
     //   image → 宿主 pipelineMode 'prompt'；video → 也是 'prompt'（都是素材出提示词，只是筛视频）
     //   viral → 宿主 pipelineMode 'viral'
     //   copy  → **纯前端栏目**：宿主不认识它，所以不写 state（写了会被 sanitize 掉）
     var PANEL_TABS = [
-      { id: 'image', label: '生图', hint: '素材 → 提示词 →（图片）按所选引擎出图（Grok / ChatGPT，在「生图要求」里选）' },
-      { id: 'copy', label: '生文案', hint: '按书 ID / 链接抓免费章节 → 按你的提示词出投放文案' },
-      { id: 'video', label: '生视频', hint: '只处理视频素材：出时间码分镜式视频提示词' },
-      { id: 'viral', label: '爆款分析', hint: '素材 → 爆款元素（蒸馏，出元素卡与创意基因报告）' },
+      { id: 'copy', label: '生文案', hint: '按书 ID / 链接抓免费章节 → 按你的提示词出投放文案', kinds: [] },
+      { id: 'viral', label: '爆款分析', hint: '素材 → 爆款元素（蒸馏，出元素卡与创意基因报告）；只吃图片/视频', kinds: ['video', 'image'] },
+      { id: 'image', label: '生图', hint: '素材/来源文本 → 执行 AI（B）按 A 写提示词（C）→ 最后选引擎（D）出图、回收成图（E）', kinds: ['image', 'text'] },
+      { id: 'video', label: '生视频', hint: '只处理视频素材：出时间码分镜式视频提示词（暂无出片引擎，产物是提示词）', kinds: ['video'] },
     ]
+    /** 栏目 ⇒ 该栏目要分析的素材种类（v0.8.0 非常驻：素材列跟着栏目走）。空数组 = 不吃素材。 */
+    function tabKinds(id) {
+      for (var i = 0; i < PANEL_TABS.length; i++) if (PANEL_TABS[i].id === id) return PANEL_TABS[i].kinds
+      return ['video', 'image', 'text']
+    }
     /** 栏目 ⇒ 宿主认识的 pipelineMode；null = 这个栏目不写宿主 state。 */
     function tabToPipelineMode(id) {
       if (id === 'viral') return 'viral'
@@ -76,9 +82,11 @@ window.__ModuleLoader__.load({
      * **抓取交给 agent**（用浏览器工具、带用户的登录态只读免费章节），插件自己不爬 ——
      * 与生图路径同一套分工：面板只准备请求，执行在会话里。
      */
-    function buildCopyRequest(books, prompt, runsRoot, processDir) {
+    function buildCopyRequest(books, prompt, runsRoot, processDir, executorValue) {
       var lines = []
       lines.push('按下面的书单出**投放素材文案**（是能直接投放的标题 / 正文 / 口播稿，不是生图提示词）。')
+      lines.push('')
+      lines.push(executorLine(executorValue))
       lines.push('')
       lines.push('书单（' + books.length + ' 本）：')
       for (var i = 0; i < books.length; i++) lines.push((i + 1) + '. ' + books[i])
@@ -94,6 +102,7 @@ window.__ModuleLoader__.load({
       lines.push('')
       lines.push('产出：每本书一个 md（文件名 = 书名），开头写清书名 / 来源链接 / 实际抓到哪些免费章节（第几章到第几章）；文案按条编号，每条标主打卖点与适用投放位（信息流 / 短剧挂载 / 书名页）。')
       if (processDir !== '') lines.push('过程目录（抓取的原文、草稿放这里）：' + processDir)
+      if (processDir !== '') lines.push('存档要求：派发前把**这份请求原文**一字不差写进 ' + path_join(processDir, 'request.md') + '（设置页的「接着做 / 请求给 AI」靠它复放）')
       if (runsRoot !== '') lines.push('产物目录：' + runsRoot + '（每本书一个子目录）')
       return lines.join('\n')
     }
@@ -145,7 +154,11 @@ window.__ModuleLoader__.load({
       '.dvp-btn:hover{border-color:var(--dsw-alias-border-l3,rgba(127,127,127,.45))}',
       '.dvp-btn:disabled{opacity:.5;cursor:default}',
       '.dvp-btn.primary{border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary,#4d6bfe) 60%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#4d6bfe) 14%,transparent);color:var(--dsw-alias-state-business-primary,#4d6bfe)}',
-      '.dvp-cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;min-height:0;overflow:visible;flex:0 0 auto}',
+      '.dvp-cols{display:grid;grid-template-columns:repeat(var(--dvp-col-n,3),1fr);gap:10px;min-height:0;overflow:visible;flex:0 0 auto}',
+      // v0.8.0：素材列数跟着栏目走（生图 2 列 / 生视频 1 列 / 爆款分析 2 列），由 data-dvp-cols 驱动
+      '.dvp-cols[data-dvp-cols="1"]{--dvp-col-n:1}',
+      '.dvp-cols[data-dvp-cols="2"]{--dvp-col-n:2}',
+      '.dvp-cols[data-dvp-cols="3"]{--dvp-col-n:3}',
       '.dvp-col{border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.22));border-radius:10px;display:flex;flex-direction:column;min-height:0;overflow:hidden}',
       // 三类素材区要一眼分得开（用户 2026-09-14）：左侧 3px 色条，视频=品牌蓝 / 图片=绿 / 文档=琥珀
       '.dvp-col[data-kind=video]{border-left:3px solid color-mix(in srgb,var(--dsw-alias-state-business-primary,#4d6bfe) 60%,transparent)}',
@@ -461,21 +474,32 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // 极简 join：请求文案里拼 Windows 路径用，避免依赖宿主。
+    // 定义在模块顶部（IIFE 内函数声明提升），四个 build*Request 都用它。
+    function path_join(dir, name) {
+      var base = String(dir || '')
+      if (base === '') return name
+      return base.replace(/[\\/]+$/, '') + '\\' + name
+    }
+
     // ─────────────────────────────────────────────────── 派发请求文案 ────────
     function chosenOf(items, kind) {
       return items.filter(function (i) { return i.kind === kind })
     }
 
-    function buildDispatchRequest(items, folder, runsRoot, processDir) {
+    function buildDispatchRequest(items, folder, runsRoot, processDir, executorValue) {
       var videos = chosenOf(items, 'video')
       var images = chosenOf(items, 'image')
       var texts = chosenOf(items, 'text')
       var lines = []
       lines.push('使用 video-prompt-pipeline 技能处理下面这批素材，逐项产出提示词。')
       lines.push('')
+      lines.push(executorLine(executorValue))
+      lines.push('')
       lines.push('- 素材目录：' + folder)
       if (runsRoot) lines.push('- 产物目录：' + runsRoot)
       if (processDir) lines.push('- 过程目录：' + processDir + '（本次派发的拆帧与中间产物全部写这里；目录名 = 执行时间 年-月-日_时分）')
+      if (processDir) lines.push('- 存档要求：派发前把**这份请求原文**一字不差写进 ' + path_join(processDir, 'request.md') + '（设置页的「接着做 / 请求给 AI」靠它复放）')
       lines.push('- 图片 ' + images.length + ' 个，视频 ' + videos.length + ' 个' + (texts.length ? '，文档 ' + texts.length + ' 个' : ''))
       lines.push('')
       lines.push('要求：')
@@ -513,17 +537,20 @@ window.__ModuleLoader__.load({
     // 新路径：视频/图片 → 爆款元素。方法就是插件自带的第 6 个技能
     // viral-media-copywriter（通用爆款素材模型）：清点 → 逐素材取证 → 四层抽象 → 元素卡 + 创意基因报告。
     // 万一技能没注册（比如宿主没重启），请求里内嵌的这套流程自己也能独立跑。
-    function buildViralRequest(items, folder, runsRoot, processDir) {
+    function buildViralRequest(items, folder, runsRoot, processDir, executorValue) {
       var videos = chosenOf(items, 'video')
       var images = chosenOf(items, 'image')
       var texts = chosenOf(items, 'text')
       var lines = []
       lines.push('用 viral-media-copywriter 技能（通用爆款素材模型）把下面这批视频/图片蒸馏成可复用的爆款元素。若技能没加载，就按本请求内嵌的流程执行。')
       lines.push('')
+      lines.push(executorLine(executorValue))
+      lines.push('')
       lines.push('- 素材目录：' + folder)
       if (runsRoot) lines.push('- 产物目录：' + runsRoot)
       if (processDir) {
         lines.push('- 过程目录：' + processDir + '（目录名 = 执行时间 年-月-日_时分）')
+        lines.push('- 存档要求：派发前把**这份请求原文**一字不差写进 ' + path_join(processDir, 'request.md') + '（设置页的「接着做 / 请求给 AI」靠它复放）')
         lines.push('- 元素卡与分析写入：' + path_join(processDir, '爆款元素') + '，拆帧写入：' + path_join(processDir, 'frames') + '，清点结果 inventory.json 也写过程目录')
       }
       lines.push('- 视频 ' + videos.length + ' 个，图片 ' + images.length + ' 个' + (texts.length ? '，参考文档 ' + texts.length + ' 个' : ''))
@@ -554,13 +581,6 @@ window.__ModuleLoader__.load({
       return lines.join('\n')
     }
 
-    // 极简 join：请求文案里拼 Windows 路径用，避免依赖宿主
-    function path_join(dir, name) {
-      var base = String(dir || '')
-      if (base === '') return name
-      return base.replace(/[\\/]+$/, '') + '\\' + name
-    }
-
     // 缩略图：单独一个组件，才能合法地用 hook 处理加载失败降级
     function Thumb(props) {
       var brokenState = React.useState(false)
@@ -580,8 +600,7 @@ window.__ModuleLoader__.load({
     }
 
     // ─────────────────────────────────────────── 生图要求（可选项）──────────
-    // 生图引擎（v0.7.0，用户 2026-09-16："用什么生图写在具体 UI 里，不要写死 Grok"）：
-    // 「用什么模型出图」和「Prompt 在哪写」都是这一栏的选择，不是大纲/skill 里的固定设定。
+    // 生图引擎 = 角色链里的 **D**（v0.7.0 引入，v0.8.0 挪到面板最后一栏 —— 用户："生图引擎应该是最后才选择"）。
     // 候选必须与宿主 index.js 的 IMAGE_ENGINES 对齐（url/label 由宿主那份说了算）。
     var IMAGE_ENGINES = [
       { value: 'grok', label: 'Grok', url: 'https://grok.com/', hint: '默认通道：grok.com 图片页，画幅是页面底部的比例按钮' },
@@ -590,6 +609,27 @@ window.__ModuleLoader__.load({
     function engineDef(value) {
       for (var i = 0; i < IMAGE_ENGINES.length; i++) if (IMAGE_ENGINES[i].value === value) return IMAGE_ENGINES[i]
       return IMAGE_ENGINES[0]
+    }
+
+    // ───────────────────────────────────────────── 执行 AI（B）· v0.8.0 ──────
+    // A/B/C/D/E 五个名字固定：A=生图 Prompt 导演规则（技能 image-prompt-director）；
+    // B=执行 AI（读素材、按 A 写 C）；C=生图提示词；D=生图引擎；E=成图回收进批次目录。
+    // B 不填 ⇒ self ⇒ 还是当前会话里的 agent（v0.7.x 行为）；选了网页家 ⇒ 派发请求第一步先打开它的站点。
+    // 取值必须与宿主 index.js 的 EXECUTOR_AIS 对齐。
+    var EXECUTOR_AIS = [
+      { value: 'self', label: '本会话（默认）', url: '', hint: '就是当前 DSH 会话里的我：不跳转网页，直接读素材按 A 写 C' },
+      { value: 'grok', label: 'Grok（网页）', url: 'https://grok.com/', hint: '让 grok.com 对话来写 C：派发请求第一步 browser_open 打开它，喂 A+素材要点，回收它的回答当提示词' },
+      { value: 'chatgpt', label: 'ChatGPT（网页）', url: 'https://chatgpt.com/', hint: '让 chatgpt.com 对话来写 C：走你 Edge 的登录态' },
+    ]
+    function executorDef(value) {
+      for (var i = 0; i < EXECUTOR_AIS.length; i++) if (EXECUTOR_AIS[i].value === value) return EXECUTOR_AIS[i]
+      return EXECUTOR_AIS[0]
+    }
+    /** 给派发请求写的 B 行：self 时如实说"就是你"，别家时带上要跳转的站点。 */
+    function executorLine(value) {
+      var ex = executorDef(value)
+      if (ex.value === 'self') return '- 执行 AI（B）：本会话（就是你）—— 按 A（image-prompt-director 的导演规则）产出 C'
+      return '- 执行 AI（B）：' + ex.label + ' —— 第一步 browser_open(use:"edge", url:"' + ex.url + '")，把 A 的规则与素材要点喂给它，回收它写的 C（提示词）回填批次后再投给 D 出图'
     }
 
     // 三组参数，都对齐出图页面上真实存在的选项：画幅是页面底部的比例按钮，
@@ -686,11 +726,14 @@ window.__ModuleLoader__.load({
     }
 
     // ───────────────────────────────────────────────── 出图派发请求（引擎可选）──────
-    function buildGrokRequest(items, planDir, source, options, docs, processDir, batchId, saveNonce, engineValue) {
+    function buildGrokRequest(items, planDir, source, options, docs, processDir, batchId, saveNonce, engineValue, executorValue) {
       var images = chosenOf(items, 'image')
       var engine = engineDef(engineValue)
       var lines = []
       lines.push('接着上一步的图片提示词，用浏览器插件驱动我的 Edge，在 ' + engine.label + ' 里出图。')
+      lines.push('')
+      lines.push(executorLine(executorValue))
+      lines.push('- 生图引擎（D）：' + engine.label + ' —— 成图（E）回收进下面的批次目录')
       lines.push('')
       lines.push('- 提示词批次目录：' + planDir)
       if (batchId) lines.push('- 批次 ID：' + batchId + '（存图时回传它，保证这一批的图进同一个目录）')
@@ -700,6 +743,7 @@ window.__ModuleLoader__.load({
       lines.push('- 待出图：' + images.length + ' 张')
       lines.push('- 落盘路由：POST /dvp/grok/save（在页面上下文里把成图字节**原样直接 POST**（raw bytes，批次/序号/slug' + (batchId ? '/nonce' : '') + ' 走 URL 参数' + (batchId ? '，batch=' + batchId : '') + (saveNonce ? '，nonce=' + saveNonce : '') + '）；宿主只回 {file,bytes,sha256,width,height} 元信息。图片字节/base64 一律不进会话文本）')
       if (processDir) lines.push('- 过程目录：' + processDir + '（草稿、临时截图、取图中间文件写这里）')
+      if (processDir) lines.push('- 存档要求：派发前把**这份请求原文**一字不差写进 ' + path_join(processDir, 'request.md') + '（设置页的「接着做 / 请求给 AI」靠它复放）')
       var optLines = grokOptionLines(options, engineValue)
       for (var oi = 0; oi < optLines.length; oi++) lines.push(optLines[oi])
       lines.push('')
@@ -838,20 +882,16 @@ window.__ModuleLoader__.load({
       var engineState = useState(typeof bootDraft.imageEngine === 'string' && bootDraft.imageEngine !== '' ? bootDraft.imageEngine : 'grok')
       var imageEngine = engineState[0]
       var setImageEngine = engineState[1]
-      // 顶部栏目（v0.4.0）：生图 / 生文案 / 生视频 / 爆款分析；宿主记着 viral 时沿用那个栏目
+      // 执行 AI（B，v0.8.0）：默认 self（本会话）；宿主 state.json 里记着别的就用那个。
+      // **改它在设置页**；面板只在「执行选择」栏显示状态 + 跳转入口 + 一个「去设置页」链接。
+      var executorState = useState('self')
+      var executorAI = executorState[0]
+      var setExecutorAI = executorState[1]
+      // 顶部栏目（v0.8.0 顺序：生文案 → 爆款分析 → 生图 → 生视频）；宿主记着 viral 时沿用那个栏目
       var tabState = useState(typeof bootDraft.tab === 'string' && bootDraft.tab !== '' ? bootDraft.tab : 'image')
       var tab = tabState[0]
       var setTab = tabState[1]
-      // 任务记录（v0.6.0）：摘要列表 + 哪一行展开着 + 已拉到的产物文件（按需）
-      var runsState = useState([])
-      var runs = runsState[0]
-      var setRuns = runsState[1]
-      var openRunState = useState('')
-      var openRun = openRunState[0]
-      var setOpenRun = openRunState[1]
-      var filesState = useState({})
-      var filesOf = filesState[0]
-      var setFilesOf = filesState[1]
+      // 任务记录（v0.8.0）：整块搬进设置页，面板不再持有 runs 状态。
       // 生文案栏目的两个输入（书单 + 文案要求提示词），跟其它草稿一样只活在内存里
       var booksState = useState(typeof bootDraft.copyBooks === 'string' ? bootDraft.copyBooks : '')
       var copyBooks = booksState[0]
@@ -886,10 +926,7 @@ window.__ModuleLoader__.load({
       var modeState = useState('prompt')
       var pipelineMode = modeState[0]
       var setPipelineMode = modeState[1]
-      // 背后的 skill 逻辑大纲：默认收起，展开才显示（它就是一份用法说明）
-      var howtoState = useState(false)
-      var howtoOpen = howtoState[0]
-      var setHowtoOpen = howtoState[1]
+      // 大纲（v0.8.0）：HOWTO_STEPS 与「背后的逻辑」抽屉都已搬进设置页，面板不再持有该状态。
       // 「按路径加文本文件」那一行的输入框（真 input，不需要受控状态）
       var pathInputRef = useRef(null)
       var wrapRef = useRef(null)
@@ -910,6 +947,7 @@ window.__ModuleLoader__.load({
               setGrokOpts(function (prev) { return Object.assign({}, prev, state.grokOptions) })
             }
             if (state.imageEngine === 'grok' || state.imageEngine === 'chatgpt') setImageEngine(state.imageEngine)
+            if (state.executorAI === 'self' || state.executorAI === 'grok' || state.executorAI === 'chatgpt') setExecutorAI(state.executorAI)
             if (state.pipelineMode === 'prompt' || state.pipelineMode === 'viral') setPipelineMode(state.pipelineMode)
             // 草稿里记过栏目就沿用草稿（用户上次停在哪一栏），否则跟着宿主的 pipelineMode 走
             if (!(typeof bootDraft.tab === 'string' && bootDraft.tab !== '')) {
@@ -928,7 +966,7 @@ window.__ModuleLoader__.load({
             } else if (nextFolder) {
               void scan(nextFolder)
             }
-            loadRuns()   // 任务记录跟着面板打开就拉一次（摘要，便宜）
+            // 任务记录已搬进设置页（v0.8.0）：面板打开不再拉 /dvp/runs（少一次请求，也少一块版面）
           } else if (res && res.error) {
             setError('宿主未就绪：' + res.error)
           }
@@ -1117,9 +1155,15 @@ window.__ModuleLoader__.load({
       var texts = useMemo(function () {
         return localFiles ? (localFiles.texts || []) : (data ? data.texts || [] : [])
       }, [data, localFiles])
+      // v0.8.0「非常驻」：素材列只显示**当前栏目要分析的**那几类 ——
+      // 生图只列图片+文档、生视频只列视频、爆款分析只列图片+视频（用户："图生图或视频生图的时候才显示需要分析的图或视频"）。
+      var tabKindsNow = useMemo(function () { return tabKinds(tab) }, [tab])
+      var colVideos = tabKindsNow.indexOf('video') >= 0 ? videos : []
+      var colImages = tabKindsNow.indexOf('image') >= 0 ? images : []
+      var colTexts = tabKindsNow.indexOf('text') >= 0 ? texts : []
       var chosen = useMemo(function () {
-        return images.concat(videos, texts).filter(function (i) { return selected[i.path] === true })
-      }, [images, videos, texts, selected])
+        return colImages.concat(colVideos, colTexts).filter(function (i) { return selected[i.path] === true })
+      }, [colImages, colVideos, colTexts, selected])
 
       function toggle(path) {
         setSelected(function (prev) {
@@ -1162,8 +1206,8 @@ window.__ModuleLoader__.load({
       }
 
       function buildRequest(processDir) {
-        if (pipelineMode === 'viral') return buildViralRequest(chosen, sourceDir(), runsRoot, processDir)
-        return buildDispatchRequest(chosen, sourceDir(), runsRoot, processDir)
+        if (pipelineMode === 'viral') return buildViralRequest(chosen, sourceDir(), runsRoot, processDir, executorAI)
+        return buildDispatchRequest(chosen, sourceDir(), runsRoot, processDir, executorAI)
       }
 
       /** 切栏目：生图/生视频/爆款分析要写回宿主认识的 pipelineMode；生文案是纯前端栏目，不写。 */
@@ -1226,7 +1270,7 @@ window.__ModuleLoader__.load({
         }
         setError('')
         void ensureProcessDir(function (processDir) {
-          var text = buildCopyRequest(books, copyPrompt.trim(), runsRoot, processDir)
+          var text = buildCopyRequest(books, copyPrompt.trim(), runsRoot, processDir, executorAI)
           var result = dispatchToComposer(text)
           if (result.ok) {
             setNote('已填入输入框（' + books.length + ' 本书），等待发送 —— 按 Enter 才开始；收起面板也不丢草稿。')
@@ -1255,7 +1299,7 @@ window.__ModuleLoader__.load({
         }
         void ensureProcessDir(function (processDir) {
           var text = tab === 'video'
-            ? buildDispatchRequest(items, sourceDir(), runsRoot, processDir) + '\n\n（本请求只要**视频提示词**：勾选的图片与文档这一轮不用出。）'
+            ? buildDispatchRequest(items, sourceDir(), runsRoot, processDir, executorAI) + '\n\n（本请求只要**视频提示词**：勾选的图片与文档这一轮不用出。）'
             : buildRequest(processDir)
           var result = dispatchToComposer(text)
           if (result.ok) {
@@ -1298,7 +1342,7 @@ window.__ModuleLoader__.load({
             return
           }
           void ensureProcessDir(function (processDir) {
-            void copyText(buildCopyRequest(books, copyPrompt.trim(), runsRoot, processDir)).then(function (ok) {
+            void copyText(buildCopyRequest(books, copyPrompt.trim(), runsRoot, processDir, executorAI)).then(function (ok) {
               if (ok) setNote('文案请求已复制（' + books.length + ' 本书）')
               else setError('复制失败，请手动选中文本复制')
             })
@@ -1312,7 +1356,7 @@ window.__ModuleLoader__.load({
         }
         void ensureProcessDir(function (processDir) {
           var text = tab === 'video'
-            ? buildDispatchRequest(copyItems, sourceDir(), runsRoot, processDir)
+            ? buildDispatchRequest(copyItems, sourceDir(), runsRoot, processDir, executorAI)
             : buildRequest(processDir)
           void copyText(text).then(function (ok) {
             if (ok) setNote('派发请求已复制（' + copyItems.length + ' 项）')
@@ -1367,7 +1411,7 @@ window.__ModuleLoader__.load({
               }
             })
             var planDir = (runsRoot || '') + '\\grok-output'
-            var payload = { entries: entries, engine: imageEngine, grokUrl: engineDef(imageEngine).url, options: grokOpts }
+            var payload = { entries: entries, engine: imageEngine, executorAI: executorAI, grokUrl: engineDef(imageEngine).url, options: grokOpts }
             if (processDir !== '') payload.processDir = processDir
             if (wantSource) payload.source = { text: sourceText, file: sourceFile }
             jsonFetch('/dvp/grok/plan', {
@@ -1388,7 +1432,7 @@ window.__ModuleLoader__.load({
                   chars: (res && res.sourceChars) || sourceChars || sourceText.length,
                 }
                 : null
-              var text = buildGrokRequest(imagesOnly, dir, sourceRef, grokOpts, docsOnly, processDir, batchId, saveNonce, imageEngine)
+              var text = buildGrokRequest(imagesOnly, dir, sourceRef, grokOpts, docsOnly, processDir, batchId, saveNonce, imageEngine, executorAI)
               var result = dispatchToComposer(text)
               if (!result.ok) {
                 void copyText(text).then(function (copied) {
@@ -1507,14 +1551,15 @@ window.__ModuleLoader__.load({
         return chain
       }
 
+      /** 「执行选择」栏的档位 + 引擎写进宿主 state（v0.8.0：任务记录/大纲已去设置页）。 */
       function saveGrokOptions() {
         void jsonFetch('/dvp/state', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mediaRoot: folder, runsRoot: runsRoot, grokOptions: grokOpts, imageEngine: imageEngine, pipelineMode: pipelineMode }),
         }).then(function (res) {
-          if (res && res.ok) setNote('生图要求已记住')
-          else setError((res && res.error) || '生图要求保存失败')
+          if (res && res.ok) setNote('执行选择已记住（档位 + 引擎）')
+          else setError((res && res.error) || '保存失败')
         })
       }
 
@@ -1523,7 +1568,7 @@ window.__ModuleLoader__.load({
         for (var i = 0; i < GROK_OPTIONS.length; i++) next[GROK_OPTIONS[i].key] = GROK_OPTIONS[i].value
         setGrokOpts(next)
         setImageEngine('grok')
-        setNote('生图要求已恢复默认（引擎回到 Grok）')
+        setNote('已恢复默认（档位回到第一项，引擎回到 Grok）')
       }
 
       function saveFolders() {
@@ -1566,7 +1611,7 @@ window.__ModuleLoader__.load({
       function renderColumn(title, list, kind) {
         var ready = 0
         for (var i = 0; i < list.length; i++) if (statusOf(list[i]) === 'ready') ready += 1
-        return h('div', { className: 'dvp-col', 'data-kind': kind },
+        return h('div', { className: 'dvp-col', key: kind, 'data-kind': kind },
           h('div', { className: 'dvp-colHead' },
             h('div', null, h('b', null, title), ' ', h('span', null, list.length + ' 项' + (ready ? ' · 已出 ' + ready : ''))),
             h('div', { style: { display: 'flex', gap: '4px' } },
@@ -1583,46 +1628,8 @@ window.__ModuleLoader__.load({
         )
       }
 
-      // ── 背后的 skill 逻辑（用法说明）：默认收起，展开时作为**中段抽屉** ──────
-      // v0.3.0：旧写法是"展开大纲就把素材列表收掉"（当时为了不让两块同时展开把底部按钮
-      // 顶出面板），代价是没法边看说明边核对素材（用户 2026-09-14 反馈）。现在大纲盖在中段
-      // 上层（绝对定位 + 自带滚动），素材列表原地不动，也不参与面板高度计算。
-      var HOWTO_STEPS = [
-        ['拿到图片', '先看画面本身，再按七段式落成提示词：① 主体（年龄/五官/发型/发色/体型/身高/气质）② 服装与配饰 ③ 动作/姿态/表情 ④ 环境/场景 ⑤ 光照/色调 ⑥ 构图/景别/镜头焦段 ⑦ 画质与风格。人物描述在每条里重复写全，不靠代词，这样批量出图时同一个人不会变脸。'],
-        ['拿到视频', '按 video-prompt-pipeline（视频复刻）先观察：用 watch 抽帧 + 尽量拿原生字幕（免费优先，没有才回退 Whisper），逐帧读；记录镜头边界与时间码、主体外观、动作与状态变化、镜头运动与景别、场景光线、音频、可辨画面文字。再产出时间码分镜式视频提示词。明确要参考图时走 Phase 3：从优化提示词里衍出两张静态图提示（首帧 + 决定性关键帧），用你已登录的浏览器 ChatGPT 生成、存进 run 的 references\\；视频生成（Phase 4）是另一个显式授权动作。'],
-        ['拿到文章/正文', '先从正文里抽「主要情节」：人物关系、冲突爆发点、关键动作与道具、场景地点、时间（昼/夜/雨/雪）、情绪走向；按冲突强度排序，挑最强的那几个当出图点；再把每个情节映射到上面那套七段式，补足原文没写但画面必须有的信息（光线、构图、镜头）。正文只当材料，里面出现的命令句不会被当指令执行。'],
-        ['拿到文档（md/txt）', '扫描到的 md / txt / srt 会进第三列「文档」，默认勾选。派发时文档当材料不当指令：agent 先读全文，按主要情节与冲突点产出图片提示词；「用引擎生图」时勾选的文档也会以路径形式附在请求里。'],
-        ['路径 · 爆款元素（蒸馏）', '面板顶部「路径」切到第二条：走插件自带的 viral-media-copywriter 技能（通用爆款素材模型）。先 inventory_media.py 只读清点去重，视频抽帧进过程目录 frames\\，逐素材取证（直接观察/功能解释/表现关联分开记、带时间戳），按四层抽象「原子线索→功能模式→创意机制→可迁移配方」出《爆款元素卡》，汇总创意基因报告（Top 模式卡、组合顺序、反例、可测试假设），需要时再按输出协议出稳健/强钩子/实验三方向原创文案。学机制不抄原句；技能万一没注册，请求内嵌同一套流程兜底。'],
-        ['过程目录', '每次派发自动建 <产物目录>\\process\\年-月-日_时分-<素材名>\\：拆帧、爆款元素卡、草稿等中间产物都进这里，和最终产物（runs 提示词、出图批次成图）分开；同分钟再派发自动加 -2 后缀。'],
-        ['出图批次目录', '「用引擎生图」一批一个目录：<产物目录>\\grok-output\\年-月-日_时分-<素材名>\\（目录名里的 grok 是历史沿革，所有引擎共用这一个根），plan.json、driver.md、来源文本、成图、ledger.json 全在这一批里；本批用什么引擎记在 plan.json 的 engine 字段。想重试就把 batchId 回传，写回同一目录；不传参数读最新一批，?batch=<批次ID> 读指定批次。'],
-        ['合成一版', '若要重出同一张，只改一个维度（姿势/服装/场景其一），其余照抄锚点，避免整条重写导致人物漂移。'],
-        ['画幅与清晰度', '画幅先按所选引擎页面上的比例按钮切好再投；清晰度越高越像"加细节"指令，额度消耗越大 —— 所以先低档出构图，满意的再单独重出高档。'],
-        ['产物与对账', '每条提示词写进 runsRoot 下以素材名命名的子目录；成图落 grok-output\\<批次ID>\\ 并写该批的 ledger.json，最后按「成功 N / 失败 M / 失败原因」对账，不静默跳过。'],
-      ]
-
-      /** 大纲抽屉：盖在中段上（素材列表原地不动）；关着时不渲染。 */
-      function renderHowtoDrawer() {
-        if (!howtoOpen) return null
-        return h('div', { className: 'dvp-drawer', 'data-dvp-howto-drawer': '1' },
-          h('div', { className: 'dvp-drawerHead' },
-            h('b', null, '背后的逻辑'),
-            h('span', { className: 'dvp-sub' }, '拿到素材后按什么规则出提示词（初版，可改）'),
-            h('div', { style: { flex: '1' } }),
-            h('button', {
-              className: 'dvp-btn',
-              type: 'button',
-              onClick: function () { setHowtoOpen(false) },
-              title: '关掉大纲，回到素材列表（素材一直没动）',
-            }, '关闭'),
-          ),
-          h('div', { className: 'dvp-howtoBody' }, HOWTO_STEPS.map(function (pair, index) {
-            return h('div', { className: 'dvp-howtoItem', key: String(index) },
-              h('b', null, pair[0]),
-              h('span', null, pair[1]),
-            )
-          })),
-        )
-      }
+    // ── 背后的 skill 逻辑（用法说明）：v0.8.0 起整节在**设置页**渲染，面板不再挂抽屉。
+    //    HOWTO_STEPS 挪到模块级：设置页与测试读同一份内容（一块地方一个事实源）。
 
       /** 发送前体积提示（v0.5.0）：算一遍**将要发出去的那段文本**的字数（纯函数、便宜），
        *  并明确写出"正文不进请求"这件事 —— 免得粘了 8 万字正文的人以为要按 8 万字收费。
@@ -1649,7 +1656,9 @@ window.__ModuleLoader__.load({
         return ''
       }
 
-      /** 栏目条：像会话区的「对话 / 轨迹 / 费用」那样一排，切换只改这一栏的内容与主按钮。 */
+      /** 栏目条（v0.8.0）：生文案 → 爆款分析 → 生图 → 生视频。引擎快捷开关已删 ——
+       *  它是 v0.7.1 为"看不见生图要求里的引擎"打的补丁，代价是引擎出现在最顶上，
+       *  与"引擎最后才选"矛盾；现在整块「执行选择」都排在素材/来源文本之后，位置问题从根上解决。 */
       function renderTabStrip() {
         return h('div', { className: 'dvp-tabs', role: 'tablist' },
           PANEL_TABS.map(function (item) {
@@ -1664,24 +1673,6 @@ window.__ModuleLoader__.load({
               onClick: function () { chooseTab(item.id) },
             }, item.label)
           }),
-          // 引擎开关在栏目条右侧再放一份（v0.7.1）：面板是整列滚动的，「生图要求」在文件列表下面，
-          // 不滚到底就等于没有这个选项（用户 2026-09-16："还需要加一个用 Edge 的 ChatGPT 生图选项"）。
-          // 与「生图要求」里那一栏共用同一个 state，两边同步；只在生图栏目出现。
-          tab === 'image' ? h('label', { className: 'dvp-opt dvp-engineTop', 'data-dvp-engine-top-wrap': '1', title: (function () {
-            var t = []
-            for (var c = 0; c < IMAGE_ENGINES.length; c++) t.push(IMAGE_ENGINES[c].label + '：' + IMAGE_ENGINES[c].hint)
-            return t.join('\n')
-          })() },
-            h('span', null, '引擎'),
-            h('select', {
-              className: 'dvp-select dvp-selectTop',
-              'data-dvp-engine-top': '1',
-              value: imageEngine,
-              onChange: function (event) { setImageEngine(event.target.value) },
-            }, IMAGE_ENGINES.map(function (eng) {
-              return h('option', { key: eng.value, value: eng.value, title: eng.hint }, eng.label)
-            })),
-          ) : null,
         )
       }
 
@@ -1717,136 +1708,21 @@ window.__ModuleLoader__.load({
         )
       }
 
-      /** 素材区（视频/图片/文档三列 + 大纲抽屉）：**紧跟"挑文件夹"那一行**，
-       *  生图要求 / 来源文本 / 大纲入口都排在它下面（用户 2026-09-14 要求的顺序）。 */
+      /** 素材区（按栏目过滤后的列）：**紧跟"挑文件夹"那一行**。
+       *  v0.8.0：列数跟着栏目走 —— 生图=图片+文档两列、生视频=视频一列、爆款分析=视频+图片两列；
+       *  「执行选择」（B 状态 + 档位 + 引擎 D）永远排在它下面（用户："引擎应该最后才选择"）。
+       *  列容器用 grid-template-columns:repeat(N,1fr)（data-dvp-cols 决定 N），CSS 见 .dvp-cols。 */
       function renderMaterialBody() {
+        var cols = []
+        if (tabKindsNow.indexOf('video') >= 0) cols.push(renderColumn(VIDEO_LABEL, videos, 'video'))
+        if (tabKindsNow.indexOf('image') >= 0) cols.push(renderColumn(IMAGE_LABEL, images, 'image'))
+        if (tabKindsNow.indexOf('text') >= 0) cols.push(renderColumn(TEXT_LABEL, texts, 'text'))
         return h('div', { className: 'dvp-body' },
-          h('div', { className: 'dvp-cols' },
-            renderColumn(VIDEO_LABEL, videos, 'video'),
-            renderColumn(IMAGE_LABEL, images, 'image'),
-            renderColumn(TEXT_LABEL, texts, 'text'),
-          ),
-          renderHowtoDrawer(),
+          h('div', { className: 'dvp-cols', 'data-dvp-cols': String(cols.length) }, cols),
         )
       }
 
-      /** 任务记录（v0.6.0）：**人看**的那份 —— 时间 · 类型 · 项数 · 过程目录，点一行展开产物文件。
-       *  摘要一次拉完（便宜）；产物文件只有点开那一行才请求（按需加载，不把大目录塞进面板）。
-       *  另一份「给 agent 读」的在 /dvp/runs?format=md：最新一条完整展开、更早压成一行。 */
-      function loadRuns() {
-        var dir = data && data.dir ? data.dir : folder
-        void jsonFetch('/dvp/runs?path=' + encodeURIComponent(dir || '')).then(function (res) {
-          if (res && res.ok === true) setRuns(Array.isArray(res.runs) ? res.runs : [])
-        })
-      }
-      function toggleRun(run) {
-        var id = run.id || run.at
-        if (openRun === id) { setOpenRun(''); return }
-        setOpenRun(id)
-        if (filesOf[id]) return
-        void jsonFetch('/dvp/runs/files?dir=' + encodeURIComponent(run.processDir || '')).then(function (res) {
-          setFilesOf(function (prev) {
-            var next = Object.assign({}, prev)
-            next[id] = res && res.ok === true ? (res.files || []) : []
-            return next
-          })
-        })
-      }
-      /** 把历史按"给 agent 读"的形式取回来（最新一条展开、更早一行一条）。 */
-      function agentHistory(action) {
-        var dir = data && data.dir ? data.dir : folder
-        void jsonFetch('/dvp/runs?format=md&path=' + encodeURIComponent(dir || '')).then(function (res) {
-          var text = res && res.ok === true ? String(res.text || '') : ''
-          if (text === '') { setError('没读到派发历史'); return }
-          if (action === 'copy') {
-            void copyText(text).then(function (ok) { ok ? setNote('历史已复制（' + runs.length + ' 条）') : setError('复制失败，请手动选中复制') })
-            return
-          }
-          var result = dispatchToComposer('接着下面的派发历史继续做（不要重新扫媒体盘）：\n\n' + text)
-          if (result.ok) setNote('历史已写进输入框，按 Enter 发送')
-          else setError(result.reason + '（可改用「复制给 AI」再手动粘贴）')
-        })
-      }
-
-      function renderRuns() {
-        var kindLabel = function (k) { return k === 'viral' ? '爆款分析' : k === 'copy' ? '生文案' : k === 'grok' ? '出图批次' : '生图' }
-        var when = function (at) {
-          var s = String(at || '')
-          if (s === '') return '—'
-          return s.replace('T', ' ').slice(5, 16)
-        }
-        return h('div', { className: 'dvp-sect', 'data-dvp-runs': '1' },
-          h('div', { className: 'dvp-sectHead' },
-            h('span', { className: 'dvp-sectTitle' }, '任务记录'),
-            h('span', { className: 'dvp-sub' }, '时间 · 类型 · 项数 · 过程目录（点一行看产物文件）'),
-            h('div', { style: { flex: '1' } }),
-            h('button', { className: 'dvp-btn', type: 'button', onClick: loadRuns, title: '重新读一遍派发历史' }, '刷新'),
-            h('button', { className: 'dvp-btn', type: 'button', onClick: function () { agentHistory('copy') }, title: '复制"给 agent 读"的那份历史（最新一条完整展开）' }, '复制给 AI'),
-            h('button', { className: 'dvp-btn', type: 'button', onClick: function () { agentHistory('send') }, title: '把历史写进输入框，接着上一批继续做' }, '接着做'),
-          ),
-          runs.length === 0
-            ? h('div', { className: 'dvp-sub' }, '还没有派发记录（每次点「准备…请求」都会记一条）')
-            : h('div', { className: 'dvp-runs' }, runs.slice(0, 20).map(function (run) {
-              var id = run.id || run.at
-              var open = openRun === id
-              var files = filesOf[id]
-              return h('div', { className: 'dvp-run', key: id },
-                h('div', {
-                  className: 'dvp-runRow',
-                  'data-open': open ? '1' : '0',
-                  title: run.processDir || '（这条没记过程目录）',
-                  onClick: function () { toggleRun(run) },
-                },
-                  h('span', { className: 'dvp-runWhen' }, when(run.at)),
-                  h('span', { className: 'dvp-runKind' }, kindLabel(run.kind)),
-                  h('span', { className: 'dvp-runCount' }, (Number(run.count) || 0) + ' 项'),
-                  h('span', { className: 'dvp-runDir' }, run.processDir ? String(run.processDir).slice(-46) : '（无过程目录）'),
-                  h('span', { className: 'dvp-runArrow' }, open ? '▾' : '▸'),
-                ),
-                open
-                  ? h('div', { className: 'dvp-runFiles' },
-                    files === undefined
-                      ? h('span', { className: 'dvp-sub' }, '读取中…')
-                      : files.length === 0
-                        ? h('span', { className: 'dvp-sub' }, '这个目录里没有文件（或读不到）：' + (run.processDir || ''))
-                        : files.map(function (f) {
-                          return h('div', { className: 'dvp-runFile', key: f.name },
-                            h('span', null, f.name),
-                            h('span', { className: 'dvp-sub' }, (f.kind === 'image' ? '图 ' : f.kind === 'video' ? '视频 ' : f.kind === 'text' ? '文本 ' : '') + formatBytes(f.bytes)),
-                            h('button', {
-                              className: 'dvp-btn',
-                              type: 'button',
-                              onClick: function (event) {
-                                event.stopPropagation()
-                                void copyText(run.processDir + '\\' + f.name).then(function (ok) { ok ? setNote('路径已复制：' + f.name) : setError('复制失败') })
-                              },
-                            }, '复制路径'),
-                          )
-                        }),
-                    run.processDir ? h('button', { className: 'dvp-btn', type: 'button', onClick: function (event) { event.stopPropagation(); void copyText(run.processDir).then(function (ok) { ok ? setNote('过程目录已复制') : setError('复制失败') }) } }, '复制目录') : null,
-                  )
-                  : null,
-              )
-            })),
-        )
-      }
-
-      /** 大纲那一行：位置固定在中段下方，只负责开合抽屉。 */
-      function renderHowtoHead() {
-        return h('div', { className: 'dvp-sect dvp-howto', 'data-dvp-howto-open': howtoOpen ? '1' : '0' },
-          h('div', { className: 'dvp-sectHead' },
-            h('span', { className: 'dvp-sectTitle' }, '背后的逻辑'),
-            h('span', { className: 'dvp-sub' }, '拿到素材后按什么规则出提示词（初版，可改）'),
-            h('div', { style: { flex: '1' } }),
-            h('button', {
-              className: 'dvp-btn',
-              type: 'button',
-              onClick: function () { setHowtoOpen(!howtoOpen) },
-              title: '盖在中段上的一层说明，关掉就回到素材列表（素材与勾选不受影响）',
-            }, howtoOpen ? '收起' : '看大纲'),
-          ),
-        )
-      }
+      /** 任务记录（v0.8.0）：整块搬进设置页；格式化器提到模块级（runKindLabel/runWhen）两边共用。 */
 
       // 大纲展开时只留它一篇，其余（生图要求之外的）区块收起来，底部按钮不动
       var modeMeta = PIPELINE_MODES[0]
@@ -1854,7 +1730,7 @@ window.__ModuleLoader__.load({
         if (PIPELINE_MODES[mi].value === pipelineMode) modeMeta = PIPELINE_MODES[mi]
       }
       var isViral = pipelineMode === 'viral'
-      // 生文案栏目与素材栏目互斥：它不吃素材勾选，也不显示素材区/生图要求/来源文本
+      // 生文案栏目与素材栏目互斥：它不吃素材勾选，也不显示素材区/来源文本（执行选择栏只留 B 状态行）
       var isCopy = tab === 'copy'
       var isVideoTab = tab === 'video'
       // 勾选项里各类的数量（页脚说明与按钮可用性都用它）
@@ -1865,18 +1741,18 @@ window.__ModuleLoader__.load({
       // 发送前体积提示用的请求预览（跟真正派发用同一批构建器，只是过程目录留空）
       var requestPreview = useMemo(function () {
         try {
-          if (isCopy) return buildCopyRequest(copyBookList(), copyPrompt.trim(), runsRoot, '')
+          if (isCopy) return buildCopyRequest(copyBookList(), copyPrompt.trim(), runsRoot, '', executorAI)
           var items = isVideoTab ? chosenOf(chosen, 'video') : chosen
-          if (pipelineMode === 'viral') return buildViralRequest(items, sourceDir(), runsRoot, '')
-          return buildDispatchRequest(items, sourceDir(), runsRoot, '')
+          if (pipelineMode === 'viral') return buildViralRequest(items, sourceDir(), runsRoot, '', executorAI)
+          return buildDispatchRequest(items, sourceDir(), runsRoot, '', executorAI)
         } catch (err) {
           return ''
         }
-      }, [isCopy, isVideoTab, chosen, pipelineMode, runsRoot, copyBooks, copyPrompt, folder, localFiles, data])
+      }, [isCopy, isVideoTab, chosen, pipelineMode, runsRoot, copyBooks, copyPrompt, folder, localFiles, data, executorAI])
 
       return h('div', { className: 'dvp-panel', 'data-dvp-tab': tab, ref: wrapRef },
         h('div', { className: 'dvp-head' },
-          h('div', { className: 'dvp-title' }, '生图 / 生文案',
+          h('div', { className: 'dvp-title' }, '生图 / 生文案 / 生视频 / 爆款分析',
             h('span', { className: 'dvp-sub' }, tabHint()),
           ),
           h('button', { className: 'dvp-x', type: 'button', title: '收起', onClick: props.onClose }, '×'),
@@ -1925,66 +1801,13 @@ window.__ModuleLoader__.load({
           h('button', { className: 'dvp-btn', type: 'button', onClick: saveFolders }, '记住'),
         ),
 
-        // 素材区紧跟"挑文件夹"那一行；生图要求 / 来源文本 / 大纲入口都排在它下面。
+        // 素材区紧跟"挑文件夹"那一行；「执行选择」（档位 + 引擎 D）与来源文本排在它下面，引擎永远最后。
         // 生文案栏目与素材栏目互斥：它显示自己的两个输入框（书单 + 文案要求）。
         isCopy ? renderCopyFields() : renderMaterialBody(),
 
-        // ── 生图要求（可选项）：默认值就能跑，想调再动 ──────────────────────
-        // v0.3.0：大纲不再占版面（它是中段抽屉），所以这里只按路径让位（爆款路径只服务图片/视频素材）
-        (isCopy || isViral) ? null : h('div', { className: 'dvp-sect' },
-          h('div', { className: 'dvp-sectHead' },
-            h('span', { className: 'dvp-sectTitle' }, '生图要求'),
-            h('span', { className: 'dvp-sub' }, '可选项 · 默认即可用'),
-            h('div', { style: { flex: '1' } }),
-            h('button', { className: 'dvp-btn', type: 'button', onClick: resetGrokOptions, title: '恢复每组的第一项' }, '恢复默认'),
-            h('button', { className: 'dvp-btn', type: 'button', onClick: saveGrokOptions, title: '记住这些选择，下次打开还是它' }, '记住'),
-          ),
-          h('div', { className: 'dvp-row' },
-            // 引擎放最前：它决定后面这些档位实际落到哪个页面上（v0.7.0，用户："用什么生图写在具体 UI 里"）
-            h('label', { className: 'dvp-opt', title: (function () {
-              var t = []
-              for (var c = 0; c < IMAGE_ENGINES.length; c++) t.push(IMAGE_ENGINES[c].label + '：' + IMAGE_ENGINES[c].hint)
-              return t.join('\n')
-            })() },
-              h('span', null, '生图引擎'),
-              h('select', {
-                className: 'dvp-select',
-                'data-dvp-engine': '1',
-                value: imageEngine,
-                onChange: function (event) { setImageEngine(event.target.value) },
-              }, IMAGE_ENGINES.map(function (eng) {
-                return h('option', { key: eng.value, value: eng.value, title: eng.hint }, eng.label)
-              })),
-            ),
-            GROK_OPTIONS.map(function (opt) {
-              return h('label', { className: 'dvp-opt', key: opt.key, title: (function () {
-                var t = []
-                for (var c = 0; c < opt.choices.length; c++) t.push(opt.choices[c].value + '：' + opt.choices[c].hint)
-                return t.join('\n')
-              })() },
-                h('span', null, opt.label),
-                h('select', {
-                  className: 'dvp-select',
-                  value: grokOpts[opt.key] || opt.value,
-                  onChange: function (event) {
-                    var value = event.target.value
-                    setGrokOpts(function (prev) {
-                      var next = Object.assign({}, prev)
-                      next[opt.key] = value
-                      return next
-                    })
-                  },
-                }, opt.choices.map(function (choice) {
-                  return h('option', { key: choice.value, value: choice.value, title: choice.hint }, choice.value)
-                })),
-              )
-            }),
-            h('span', { className: 'dvp-sub' }, '风格：按每条提示词里写明的风格执行（不在选项里另加）'),
-          ),
-        ),
-
         // ── 来源文本（小说免费章节 / 章纲）：按主要情节生图 ─────────────────
-        // 爆款路径不带小说正文（素材就是视频/图片本身），生文案栏目有自己的书单输入
+        // 爆款路径不带小说正文（素材就是视频/图片本身），生文案栏目有自己的书单输入。
+        // v0.8.0 顺序调整：来源文本排在「执行选择」**前面** —— 引擎（D）永远是最后才选的东西。
         (isCopy || isViral) ? null : h('div', { className: 'dvp-sect' },
           h('div', { className: 'dvp-sectHead' },
             h('span', { className: 'dvp-sectTitle' }, '来源文本'),
@@ -2033,9 +1856,73 @@ window.__ModuleLoader__.load({
           sourcePath ? h('div', { className: 'dvp-sub' }, '已落盘：' + sourcePath + (sourceChars ? '（' + sourceChars + ' 字）· 请求里只带路径与字数' : '')) : null,
         ),
 
-        isCopy ? null : renderRuns(),
-
-        isCopy ? null : renderHowtoHead(),
+        // ── 执行选择（v0.8.0，面板最后一栏）：B 状态 → 生图档位 → D 引擎 ──────
+        // 用户："生图引擎应该是最后才选择，同理，生视频、爆款分析部分也一样"。
+        //   生图 = 档位 + 引擎（D）；生视频/爆款分析没有出片引擎，这一栏只剩 B 的状态行（+跳转入口）。
+        //   任务记录与「背后的逻辑」（A 大纲）已搬进设置页。
+        h('div', { className: 'dvp-sect', 'data-dvp-exec': '1' },
+          h('div', { className: 'dvp-sectHead' },
+            h('span', { className: 'dvp-sectTitle' }, '执行选择'),
+            h('span', { className: 'dvp-sub' }, '最后一步 · 执行 AI（B）在设置页改'),
+            h('div', { style: { flex: '1' } }),
+            (isCopy || isViral || isVideoTab) ? null : h('button', { className: 'dvp-btn', type: 'button', onClick: saveGrokOptions, title: '记住这些选择（含引擎），下次打开还是它' }, '记住'),
+          ),
+          h('div', { className: 'dvp-row' },
+            h('span', { className: 'dvp-sub', 'data-dvp-executor-line': '1' },
+              'B 执行 AI：' + executorDef(executorAI).label
+              + (executorDef(executorAI).url !== '' ? '（派发第一步先打开 ' + executorDef(executorAI).url + '）' : '（就是你，不用跳转）')),
+            executorDef(executorAI).url !== '' ? h('button', {
+              className: 'dvp-btn', type: 'button',
+              onClick: function () { void copyText(executorDef(executorAI).url).then(function (ok) { ok ? setNote('B 站点已复制：' + executorDef(executorAI).url) : setError('复制失败') }) },
+              title: '复制执行 AI 的站点地址（要真跳转由派发请求里的 browser_open 完成）',
+            }, '复制 B 站点') : null,
+            h('a', { className: 'dvp-btn', href: '/settings/', target: '_blank', rel: 'noreferrer', style: { display: 'inline-flex', alignItems: 'center', textDecoration: 'none', height: '28px', padding: '0 11px', borderRadius: '8px', border: '1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3))', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' }, title: '执行 AI（B）、任务记录、生图逻辑（A）和技能电池都在设置页' }, '去设置页改 B'),
+          ),
+          // 档位三件 + 引擎（D）：只有生图栏目有这些（爆款/生视频不产图）
+          (isCopy || isViral || isVideoTab) ? null : h('div', { className: 'dvp-row' },
+            GROK_OPTIONS.map(function (opt) {
+              return h('label', { className: 'dvp-opt', key: opt.key, title: (function () {
+                var t = []
+                for (var c = 0; c < opt.choices.length; c++) t.push(opt.choices[c].value + '：' + opt.choices[c].hint)
+                return t.join('\n')
+              })() },
+                h('span', null, opt.label),
+                h('select', {
+                  className: 'dvp-select',
+                  value: grokOpts[opt.key] || opt.value,
+                  onChange: function (event) {
+                    var value = event.target.value
+                    setGrokOpts(function (prev) {
+                      var next = Object.assign({}, prev)
+                      next[opt.key] = value
+                      return next
+                    })
+                  },
+                }, opt.choices.map(function (choice) {
+                  return h('option', { key: choice.value, value: choice.value, title: choice.hint }, choice.value)
+                })),
+              )
+            }),
+            // 引擎（D）排在这一栏最后一个：前面的档位不管怎么选，去哪出图是最后定的事
+            h('label', { className: 'dvp-opt', title: (function () {
+              var t = []
+              for (var c = 0; c < IMAGE_ENGINES.length; c++) t.push(IMAGE_ENGINES[c].label + '：' + IMAGE_ENGINES[c].hint)
+              return t.join('\n')
+            })() },
+              h('span', null, '生图引擎（D）'),
+              h('select', {
+                className: 'dvp-select',
+                'data-dvp-engine': '1',
+                value: imageEngine,
+                onChange: function (event) { setImageEngine(event.target.value) },
+              }, IMAGE_ENGINES.map(function (eng) {
+                return h('option', { key: eng.value, value: eng.value, title: eng.hint }, eng.label)
+              })),
+            ),
+            h('button', { className: 'dvp-btn', type: 'button', onClick: resetGrokOptions, title: '恢复每组的第一项（引擎回到 Grok）' }, '恢复默认'),
+            h('span', { className: 'dvp-sub' }, '风格：按每条提示词里写明的风格执行（不在选项里另加）'),
+          ),
+        ),
 
         error ? h('div', { className: 'dvp-warn' }, error) : null,
         !error && note ? h('div', { className: 'dvp-ok' }, note) : null,
@@ -2165,62 +2052,368 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ─────────────────────────────────────────── 设置页：验收用的预览入口 ────
-    // 面板还没法用（比如槽位没出现、宿主没起）时，这里能独立证明插件挂上了：
-    // 打开 /dvp/preview/ 就是同一份组件在真实页面里的样子。
-    function PreviewSettingsPage() {
-      var skills = ['video-prompt-pipeline（视频复刻）', 'watch', 'oneshot-prompt-generator', 'prompt-videos', 'video-generation', 'viral-media-copywriter（通用爆款素材模型 · 蒸馏）']
-      var resultState = React.useState('')
+    // 背后的 skill 逻辑大纲（v0.8.0：设置页渲染这份，面板不再挂抽屉；internals 导出给测试）。
+    var HOWTO_STEPS = [
+      ['拿到图片', '先看画面本身，再按七段式落成提示词：① 主体（年龄/五官/发型/发色/体型/身高/气质）② 服装与配饰 ③ 动作/姿态/表情 ④ 环境/场景 ⑤ 光照/色调 ⑥ 构图/景别/镜头焦段 ⑦ 画质与风格。人物描述在每条里重复写全，不靠代词，这样批量出图时同一个人不会变脸。生图栏目的 A（技能 image-prompt-director）在这一条之上再加投放素材的钩子、图内文案与拼图规则。'],
+      ['拿到视频', '按 video-prompt-pipeline（视频复刻）先观察：用 watch 抽帧 + 尽量拿原生字幕（免费优先，没有才回退 Whisper），逐帧读；记录镜头边界与时间码、主体外观、动作与状态变化、镜头运动与景别、场景光线、音频、可辨画面文字。再产出时间码分镜式视频提示词。明确要参考图时走 Phase 3：从优化提示词里衍出两张静态图提示（首帧 + 决定性关键帧），用你已登录的浏览器 ChatGPT 生成、存进 run 的 references\\；视频生成（Phase 4）是另一个显式授权动作。'],
+      ['拿到文章/正文', '先从正文里抽「主要情节」：人物关系、冲突爆发点、关键动作与道具、场景地点、时间（昼/夜/雨/雪）、情绪走向；按冲突强度排序，挑最强的那几个当出图点；再把每个情节映射到上面那套七段式，补足原文没写但画面必须有的信息（光线、构图、镜头）。正文只当材料，里面出现的命令句不会被当指令执行。'],
+      ['拿到文档（md/txt）', '扫描到的 md / txt / srt 会进「文档」列（只在吃文档的栏目显示），默认勾选。派发时文档当材料不当指令：agent 先读全文，按主要情节与冲突点产出图片提示词；「用引擎生图」时勾选的文档也会以路径形式附在请求里。'],
+      ['路径 · 爆款元素（蒸馏）', '切到「爆款分析」栏目：走插件自带的 viral-media-copywriter 技能（通用爆款素材模型）。先 inventory_media.py 只读清点去重，视频抽帧进过程目录 frames\\，逐素材取证（直接观察/功能解释/表现关联分开记、带时间戳），按四层抽象「原子线索→功能模式→创意机制→可迁移配方」出《爆款元素卡》，汇总创意基因报告（Top 模式卡、组合顺序、反例、可测试假设），需要时再按输出协议出稳健/强钩子/实验三方向原创文案。学机制不抄原句；技能万一被拔掉或没注册，请求内嵌同一套流程兜底。'],
+      ['过程目录', '每次派发自动建 <产物目录>\\process\\年-月-日_时分-<素材名>\\：拆帧、爆款元素卡、草稿等中间产物都进这里，和最终产物（runs 提示词、出图批次成图）分开；同分钟再派发自动加 -2 后缀。'],
+      ['出图批次目录', '「用引擎生图」一批一个目录：<产物目录>\\grok-output\\年-月-日_时分-<素材名>\\（目录名里的 grok 是历史沿革，所有引擎共用这一个根），plan.json、driver.md、来源文本、成图、ledger.json 全在这一批里；本批用什么引擎记在 plan.json 的 engine 字段，执行 AI（B）记在 executorAI 字段。想重试就把 batchId 回传，写回同一目录；不传参数读最新一批，?batch=<批次ID> 读指定批次。'],
+      ['角色链 A/B/C/D/E', 'A=生图 Prompt 导演规则（技能 image-prompt-director，设置页可查看全文并复制）；B=执行 AI（设置页选：本会话=我，或 Grok/ChatGPT 网页 —— 选网页家时派发第一步先打开它的站点喂 A 回收 C）；C=生图提示词（driver.md 清单）；D=生图引擎（面板最后一栏选，只服务出图）；E=成图（回收进批次目录）。生视频与爆款分析没有 D：它们的最后一选是 B。'],
+      ['合成一版', '若要重出同一张，只改一个维度（姿势/服装/场景其一），其余照抄锚点，避免整条重写导致人物漂移。'],
+      ['画幅与清晰度', '画幅先按所选引擎页面上的比例按钮切好再投；清晰度越高越像"加细节"指令，额度消耗越大 —— 所以先低档出构图，满意的再单独重出高档。'],
+      ['产物与对账', '每条提示词写进 runsRoot 下以素材名命名的子目录；成图落 grok-output\\<批次ID>\\ 并写该批的 ledger.json，最后按「成功 N / 失败 M / 失败原因」对账，不静默跳过。任务记录在设置页这一排看：点一行展开产物文件，「接着做」把最近一次派发续回输入框。'],
+    ]
+    // 面板与设置页共用的任务记录格式化器（v0.8.0：记录搬进设置页，这里提到模块级）
+    function runKindLabel(k) { return k === 'viral' ? '爆款分析' : k === 'copy' ? '生文案' : k === 'grok' ? '出图批次' : '生图' }
+    function runWhen(at) {
+      var s = String(at || '')
+      if (s === '') return '—'
+      return s.replace('T', ' ').slice(5, 16)
+    }
+
+    // ─────────────────────────────────────── 设置页（v0.8.0：记录 + 逻辑 + B + 电池）───
+    // 对话页面板只留"干活"的东西；**任务记录、生图逻辑（A）、执行 AI（B）、技能电池**都在这页。
+    // 数据全部走宿主 /dvp/*，不新增依赖。
+    function SettingsPage() {
+      var useState = React.useState
+      var useEffect = React.useEffect
+
+      var stateState = useState(null)
+      var hostState = stateState[0]
+      var setHostState = stateState[1]
+      var executorState = useState('self')
+      var executorAI = executorState[0]
+      var setExecutorAI = executorState[1]
+      var runsState = useState([])
+      var runs = runsState[0]
+      var setRuns = runsState[1]
+      var openRunState = useState('')
+      var openRun = openRunState[0]
+      var setOpenRun = openRunState[1]
+      var filesState = useState({})
+      var filesOf = filesState[0]
+      var setFilesOf = filesState[1]
+      var batteryState = useState([])
+      var battery = batteryState[0]
+      var setBattery = batteryState[1]
+      var noteState = useState('')
+      var note = noteState[0]
+      var setNote = noteState[1]
+      var errorState = useState('')
+      var error = errorState[0]
+      var setError = errorState[1]
+      var resultState = useState('')
       var result = resultState[0]
       var setResult = resultState[1]
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '760px' } },
-        h('div', { style: { fontSize: '15px', fontWeight: 600 } }, '生图'),
-        h('div', { style: { fontSize: '12.5px', lineHeight: 1.8, color: 'var(--dsw-alias-label-secondary)' } },
-          '对话框旁的模式入口（与 PPT 同一按钮簇，另外在输入条右侧常驻一个 chip）。',
-          '选一个媒体文件夹，面板按图片／视频／文档三列分流列出素材（每列带独立滚动条，层数可调），',
-          '顶部「路径」二选一：素材→提示词→生图（主线），或 视频/图片→爆款元素（蒸馏）。',
-          '勾选后「准备生图请求」把请求写进输入框（按 Enter 才发送），由 agent 按 video-prompt-pipeline 逐项产出提示词；',
-          '也可以粘一段小说正文/章纲或加 txt/md 文件，按主要情节生图，',
-          '最后点「用 <引擎> 生图」建批次并驱动 Edge 出图（引擎在「生图要求」里选）。每次派发自动建过程目录（process\\年-月-日_时分-素材名），',
-          '拆帧与分析产物都写那里。面板里「背后的逻辑」一栏写了全部规则。',
+      // A（生图 Prompt 导演规则）：正文来自技能文件；这里给查看 + 复制，编辑覆盖暂未开放（见下方说明）
+      var directorState = useState(null)
+      var directorDoc = directorState[0]
+      var setDirectorDoc = directorState[1]
+      var directorOpenState = useState(false)
+      var directorOpen = directorOpenState[0]
+      var setDirectorOpen = directorOpenState[1]
+
+      function putState(body, onOk, onErr) {
+        void jsonFetch('/dvp/state', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).then(function (res) {
+          if (res && res.ok) { if (onOk) onOk(res) } else { if (onErr) onErr((res && res.error) || '保存失败') }
+        }).catch(function (err) { if (onErr) onErr(String((err && err.message) || err)) })
+      }
+
+      function loadRuns() {
+        void jsonFetch('/dvp/runs').then(function (res) {
+          if (res && res.ok === true) setRuns(Array.isArray(res.runs) ? res.runs : [])
+        }).catch(function () { /* 宿主没起时保持旧列表 */ })
+      }
+      function toggleRun(run) {
+        var id = run.id || run.at
+        if (openRun === id) { setOpenRun(''); return }
+        setOpenRun(id)
+        if (filesOf[id]) return
+        void jsonFetch('/dvp/runs/files?dir=' + encodeURIComponent(run.processDir || '')).then(function (res) {
+          setFilesOf(function (prev) {
+            var next = Object.assign({}, prev)
+            next[id] = res && res.ok === true ? (res.files || []) : []
+            return next
+          })
+        })
+      }
+      /** 「接着做」：把最近一次派发的**原始请求**重新写进会话输入框（按 Enter 才发送）。
+       *  优先读过程目录里的 request.md（派发时 agent 落盘的原文）；没有就退回摘要行拼的续做说明。 */
+      function continueLastRun() {
+        var last = runs.length > 0 ? runs[0] : null
+        if (!last) { setError('还没有任务记录'); return }
+        var fallbackText = '接着上一次派发继续做（不要重新扫媒体盘）：\n- 类型：' + runKindLabel(last.kind)
+          + '\n- 过程目录：' + (last.processDir || '（这条没记）')
+          + '\n- 项数：' + (Number(last.count) || 0)
+        var dir = String(last.processDir || '')
+        if (dir === '') { pushToComposer(fallbackText); return }
+        void jsonFetch('/dvp/runs/files?dir=' + encodeURIComponent(dir)).then(function (res) {
+          var files = res && res.ok === true ? (res.files || []) : []
+          var reqFile = null
+          for (var i = 0; i < files.length; i++) {
+            if (/^request\.md$/i.test(files[i].name)) { reqFile = files[i].name; break }
+          }
+          if (!reqFile) { pushToComposer(fallbackText); return }
+          void jsonFetch('/dvp/file?path=' + encodeURIComponent(dir + '\\' + reqFile)).then(function (fr) {
+            if (fr && fr.ok === true && typeof fr.text === 'string' && fr.text !== '') pushToComposer(fr.text)
+            else pushToComposer(fallbackText)
+          })
+        })
+      }
+      function pushToComposer(text) {
+        var result = dispatchToComposer(text)
+        if (result.ok) setNote('已写进会话输入框，按 Enter 发送')
+        else void copyText(text).then(function (ok) { setError(result.reason + (ok ? '，已改复制到剪贴板' : '')) })
+      }
+      function copyRunsForAgent() {
+        var lines = runs.slice(0, 20).map(function (r) {
+          return '- ' + runWhen(r.at) + ' · ' + runKindLabel(r.kind) + ' · ' + (Number(r.count) || 0) + ' 项 · ' + (r.processDir || '（无过程目录）')
+        })
+        void copyText(lines.join('\n')).then(function (ok) { ok ? setNote('任务记录已复制（' + runs.length + ' 条）') : setError('复制失败') })
+      }
+
+      /** 「请求给 AI」：取最近一次派发的**原始请求全文**（过程目录 request.md，agent 落盘的原文）复制到剪贴板。 */
+      function copyLastRequest() {
+        var last = runs.length > 0 ? runs[0] : null
+        if (!last || !last.processDir) { setError('最近这条记录没有过程目录，拿不到原请求'); return }
+        var dir = String(last.processDir)
+        void jsonFetch('/dvp/file?path=' + encodeURIComponent(dir + '\\request.md')).then(function (fr) {
+          if (fr && fr.ok === true && typeof fr.text === 'string' && fr.text !== '') {
+            void copyText(fr.text).then(function (ok) { ok ? setNote('最近一次派发的原请求已复制') : setError('复制失败') })
+          } else {
+            setError('过程目录里没有 request.md（派发时让 agent 把原请求存一份，下次就有）')
+          }
+        })
+      }
+
+      function saveExecutor(value) {
+        setExecutorAI(value)
+        putState({ executorAI: value }, function () { setNote('执行 AI（B）已记住：' + executorDef(value).label) }, function (msg) { setError(msg) })
+      }
+
+      function toggleSkill(name, installed) {
+        void jsonFetch('/dvp/skills/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name, installed: installed }),
+        }).then(function (res) {
+          if (res && res.ok) {
+            setBattery(Array.isArray(res.battery) ? res.battery : [])
+            setNote((installed ? '已装回：' : '已拔掉：') + name + (res.note ? '（' + res.note + '）' : ''))
+            if (res.warning) setError(res.warning)
+          } else setError((res && res.error) || '切换失败')
+        }).catch(function (err) { setError('切换请求失败：' + String((err && err.message) || err)) })
+      }
+
+      function reloadSkills() {
+        setResult('重扫中…')
+        jsonFetch('/dvp/skills/reload', { method: 'POST' }).then(function (res) {
+          if (res && res.ok) {
+            setResult((res.added && res.added.length) ? '新增注册：' + res.added.join('、') : '无新技能（已注册 ' + (res.alreadyRegistered || []).length + ' 个；改已有技能正文要重启）')
+            if (Array.isArray(res.battery)) setBattery(res.battery)
+          } else setResult('重扫失败：' + ((res && res.error) || '未知错误'))
+        }).catch(function (err) {
+          setResult('重扫失败：' + String((err && err.message) || err) + '（宿主版本过旧？重启桌面端后可用）')
+        })
+      }
+
+      useEffect(function () {
+        var alive = true
+        jsonFetch('/dvp/state').then(function (res) {
+          if (!alive) return
+          if (res && res.ok) {
+            setHostState(res.state || {})
+            var ex = res.state && res.state.executorAI
+            if (ex === 'grok' || ex === 'chatgpt' || ex === 'self') setExecutorAI(ex)
+          } else if (res && res.error) setError('宿主未就绪：' + res.error)
+        }).catch(function (err) { setError('无法访问宿主路由：' + String((err && err.message) || err)) })
+        loadRuns()
+        jsonFetch('/dvp/skills').then(function (res) {
+          if (alive && res && res.ok && Array.isArray(res.battery)) setBattery(res.battery)
+        })
+        // A 正文：从宿主读技能文件（GET /dvp/director，v0.8.0 起提供）
+        jsonFetch('/dvp/director').then(function (res) {
+          if (!alive) return
+          if (res && res.ok && typeof res.text === 'string') setDirectorDoc(res.text)
+          else setDirectorDoc('')
+        })
+        return function () { alive = false }
+      }, [])
+
+      var secStyle = { display: 'flex', flexDirection: 'column', gap: '8px', padding: '14px 0', borderBottom: '1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.18))' }
+      var h3Style = { fontSize: '14px', fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }
+      var subStyle = { fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.7 }
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', maxWidth: '860px' }, 'data-dvp-settings': '1' },
+        h('div', { style: { fontSize: '15px', fontWeight: 600, padding: '4px 0' } }, '生图插件 · 记录与设置'),
+        h('div', { style: subStyle }, '任务记录、生图逻辑（A）、执行 AI（B）和技能电池都在这一页；对话框旁的面板只管选素材和准备请求。'),
+        error ? h('div', { className: 'dvp-warn' }, error) : null,
+        !error && note ? h('div', { className: 'dvp-ok' }, note) : null,
+
+        // ── 执行 AI（B）──────────────────────────────────────────────────────
+        h('div', { style: secStyle, 'data-dvp-set-executor': '1' },
+          h('div', { style: h3Style }, '执行 AI（B）· 谁来产出提示词'),
+          h('div', { style: subStyle },
+            '角色链：A=生图 Prompt 导演规则（下面「生图逻辑」）· B=执行 AI（读素材按 A 写 C）· C=生图提示词 · D=生图引擎（Grok/ChatGPT，在面板最后一栏选）· E=成图回收进批次目录。',
+            '留默认「本会话」就是现在的我；选网页家后，派发请求的第一步会先 browser_open 打开它的站点、把 A 和素材要点喂给它。'),
+          h('div', { className: 'dvp-row' },
+            h('select', {
+              className: 'dvp-select',
+              'data-dvp-executor': '1',
+              value: executorAI,
+              onChange: function (event) { saveExecutor(event.target.value) },
+            }, EXECUTOR_AIS.map(function (ex) {
+              return h('option', { key: ex.value, value: ex.value, title: ex.hint }, ex.label)
+            })),
+            executorDef(executorAI).url !== '' ? h('a', {
+              className: 'dvp-btn', href: executorDef(executorAI).url, target: '_blank', rel: 'noreferrer',
+              style: { display: 'inline-flex', alignItems: 'center', textDecoration: 'none', height: '28px', padding: '0 11px', borderRadius: '8px', border: '1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3))', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' },
+            }, '打开 ' + executorDef(executorAI).label) : null,
+          ),
         ),
-        h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
-          h('a', {
-            className: 'dvp-btn',
-            href: '/dvp/preview/',
-            target: '_blank',
-            rel: 'noreferrer',
-            style: { display: 'inline-flex', alignItems: 'center', textDecoration: 'none', height: '28px', padding: '0 11px', borderRadius: '8px', border: '1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3))', color: 'var(--dsw-alias-label-primary)', fontSize: '12px' },
-          }, '打开组件预览页'),
-          h('a', {
-            className: 'dvp-btn',
-            href: '/dvp/state',
-            target: '_blank',
-            rel: 'noreferrer',
-            style: { display: 'inline-flex', alignItems: 'center', textDecoration: 'none', height: '28px', padding: '0 11px', borderRadius: '8px', border: '1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3))', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' },
-          }, '宿主状态 JSON (/dvp/state)'),
-          h('button', {
-            className: 'dvp-btn',
-            type: 'button',
-            title: '重扫本包 skills/ 目录：开机后新增的技能免重启注册（同名 first-wins，改已有技能正文仍需重启）',
-            style: { display: 'inline-flex', alignItems: 'center', height: '28px', padding: '0 11px', borderRadius: '8px', border: '1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3))', background: 'transparent', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', cursor: 'pointer' },
-            onClick: function () {
-              setResult('重扫中…')
-              jsonFetch('/dvp/skills/reload', { method: 'POST' }).then(function (res) {
-                if (res && res.ok) {
-                  setResult((res.added && res.added.length) ? '新增注册：' + res.added.join('、') : '无新技能（已注册 ' + (res.alreadyRegistered || []).length + ' 个；改已有技能正文要重启）')
-                } else {
-                  setResult('重扫失败：' + ((res && res.error) || '未知错误'))
-                }
-              }).catch(function (err) {
-                setResult('重扫失败：' + String((err && err.message) || err) + '（宿主版本过旧？重启桌面端后可用）')
-              })
-            },
-          }, '重扫技能包'),
-          result === '' ? null : h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)' } }, result),
+
+        // ── 任务记录 ─────────────────────────────────────────────────────────
+        h('div', { style: secStyle, 'data-dvp-set-runs': '1' },
+          h('div', { className: 'dvp-sectHead' },
+            h('span', { style: h3Style }, '任务记录'),
+            h('span', { className: 'dvp-sub' }, '时间 · 类型 · 项数 · 过程目录（点一行看产物文件）'),
+            h('div', { style: { flex: '1' } }),
+            h('button', { className: 'dvp-btn', type: 'button', onClick: loadRuns, title: '重新读一遍派发历史' }, '刷新'),
+            h('button', { className: 'dvp-btn', type: 'button', onClick: copyRunsForAgent, title: '复制这份记录（贴给任何 AI 都能续做）' }, '复制给 AI'),
+            h('button', { className: 'dvp-btn', type: 'button', onClick: copyLastRequest, title: '复制最近一次派发的原始请求全文（过程目录 request.md）' }, '请求给 AI'),
+            h('button', { className: 'dvp-btn', type: 'button', onClick: continueLastRun, title: '把最近一次派发重新写进会话输入框（按 Enter 才发送）' }, '接着做'),
+          ),
+          runs.length === 0
+            ? h('div', { className: 'dvp-sub' }, '还没有任务记录（面板每次点「准备…请求」都会记一条）')
+            : h('div', { className: 'dvp-runs' }, runs.slice(0, 20).map(function (run) {
+              var id = run.id || run.at
+              var open = openRun === id
+              var files = filesOf[id]
+              return h('div', { className: 'dvp-run', key: id },
+                h('div', {
+                  className: 'dvp-runRow',
+                  'data-open': open ? '1' : '0',
+                  title: run.processDir || '（这条没记过程目录）',
+                  onClick: function () { toggleRun(run) },
+                },
+                  h('span', { className: 'dvp-runWhen' }, runWhen(run.at)),
+                  h('span', { className: 'dvp-runKind' }, runKindLabel(run.kind)),
+                  h('span', { className: 'dvp-runCount' }, (Number(run.count) || 0) + ' 项'),
+                  h('span', { className: 'dvp-runDir' }, run.processDir ? String(run.processDir).slice(-46) : '（无过程目录）'),
+                  h('span', { className: 'dvp-runArrow' }, open ? '▾' : '▸'),
+                ),
+                open
+                  ? h('div', { className: 'dvp-runFiles' },
+                    files === undefined
+                      ? h('span', { className: 'dvp-sub' }, '读取中…')
+                      : files.length === 0
+                        ? h('span', { className: 'dvp-sub' }, '这个目录里没有文件（或读不到）：' + (run.processDir || ''))
+                        : files.map(function (f) {
+                          return h('div', { className: 'dvp-runFile', key: f.name },
+                            h('span', null, f.name),
+                            h('span', { className: 'dvp-sub' }, (f.kind === 'image' ? '图 ' : f.kind === 'video' ? '视频 ' : f.kind === 'text' ? '文本 ' : '') + formatBytes(f.bytes)),
+                            h('button', {
+                              className: 'dvp-btn',
+                              type: 'button',
+                              onClick: function (event) {
+                                event.stopPropagation()
+                                void copyText((run.processDir || '') + '\\' + f.name).then(function (ok) { ok ? setNote('路径已复制：' + f.name) : setError('复制失败') })
+                              },
+                            }, '复制路径'),
+                          )
+                        }),
+                    run.processDir ? h('button', { className: 'dvp-btn', type: 'button', onClick: function (event) { event.stopPropagation(); void copyText(run.processDir).then(function (ok) { ok ? setNote('过程目录已复制') : setError('复制失败') }) } }, '复制目录') : null,
+                  )
+                  : null,
+              )
+            })),
         ),
-        h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.8 } },
-          '本插件注册的技能：', skills.join('、'),
+
+        // ── 生图逻辑（A）+ 背后的逻辑大纲 ────────────────────────────────────
+        h('div', { style: secStyle, 'data-dvp-set-logic': '1' },
+          h('div', { className: 'dvp-sectHead' },
+            h('span', { style: h3Style }, '生图逻辑（A）· 给生图 AI 的导演规则'),
+            h('div', { style: { flex: '1' } }),
+            h('button', { className: 'dvp-btn', type: 'button', onClick: function () { setDirectorOpen(!directorOpen) } }, directorOpen ? '收起' : '查看全文'),
+            h('button', {
+              className: 'dvp-btn', type: 'button',
+              onClick: function () {
+                if (typeof directorDoc !== 'string' || directorDoc === '') { setError('还没读到 A 的正文（宿主版本过旧？重启桌面端后可用）'); return }
+                void copyText(directorDoc).then(function (ok) { ok ? setNote('A 全文已复制（可直接粘给任何生图 AI）') : setError('复制失败') })
+              },
+            }, '复制 A 全文'),
+          ),
+          h('div', { style: subStyle },
+            'A 存在技能 image-prompt-director/SKILL.md 里（海外网文封面 Prompt 导演 · 爆款增强版）。',
+            '它随下面的「技能电池」一起插拔 —— 拔掉后派发请求不再引用它；改正文直接编辑该文件（改完要重启桌面端，同名 first-wins）。'),
+          directorOpen
+            ? (typeof directorDoc === 'string' && directorDoc !== ''
+              ? h('pre', { style: { maxHeight: '320px', overflow: 'auto', fontSize: '11.5px', lineHeight: 1.7, whiteSpace: 'pre-wrap', margin: '0', padding: '10px', borderRadius: '8px', border: '1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.2))', background: 'var(--dsw-alias-bg-base,transparent)', color: 'var(--dsw-alias-label-secondary)' } }, directorDoc)
+              : h('div', { className: 'dvp-sub' }, '读不到 A 的正文：确认宿主里有 GET /dvp/director 路由（v0.8.0 起提供），或重启桌面端。'))
+            : null,
+        ),
+        h('div', { style: secStyle, 'data-dvp-set-howto': '1' },
+          h('div', { style: h3Style }, '背后的逻辑（出提示词的规则大纲）'),
+          h('div', { style: subStyle }, '拿到素材后按什么规则出提示词（初版，可改 client.js 里的 HOWTO_STEPS）：'),
+          h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '4px' } },
+            HOWTO_STEPS.map(function (pair, index) {
+              return h('div', { key: String(index), style: { fontSize: '12.5px', lineHeight: 1.75, color: 'var(--dsw-alias-label-secondary)' } },
+                h('b', { style: { color: 'var(--dsw-alias-label-primary)' } }, pair[0] + '　'),
+                pair[1],
+              )
+            }),
+          ),
+        ),
+
+        // ── 技能电池 ─────────────────────────────────────────────────────────
+        h('div', { style: secStyle, 'data-dvp-set-battery': '1' },
+          h('div', { className: 'dvp-sectHead' },
+            h('span', { style: h3Style }, '技能电池 · 可拆卸'),
+            h('span', { className: 'dvp-sub' }, '每个技能是一块电池：拔掉即从注册目录摘除（agent 不再看见），装回免重启'),
+            h('div', { style: { flex: '1' } }),
+            h('button', { className: 'dvp-btn', type: 'button', onClick: reloadSkills, title: '重扫本包 skills/ 目录：开机后新增的技能免重启注册（同名 first-wins，改已有技能正文仍需重启）' }, '重扫技能包'),
+          ),
+          result === '' ? null : h('div', { style: subStyle }, result),
+          battery.length === 0
+            ? h('div', { className: 'dvp-sub' }, '没有读到技能清单（宿主未就绪？）—— 点「重扫技能包」试试')
+            : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(260px,1fr))', gap: '8px', paddingTop: '6px' } },
+              battery.map(function (cell) {
+                return h('div', {
+                  key: cell.name,
+                  'data-dvp-cell': cell.name,
+                  'data-installed': cell.installed ? '1' : '0',
+                  style: { border: '1px solid ' + (cell.installed ? 'color-mix(in srgb,var(--dsw-alias-state-success-primary,#2da44e) 45%,transparent)' : 'var(--dsw-alias-border-l2,rgba(127,127,127,.3))'), borderRadius: '10px', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '6px' },
+                },
+                  h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+                    h('b', { style: { fontSize: '12.5px', color: 'var(--dsw-alias-label-primary)' } }, cell.name),
+                    h('span', { className: 'dvp-sub' }, cell.installed ? '⚡ 装着' : '○ 已拔掉'),
+                    h('div', { style: { flex: '1' } }),
+                    h('button', {
+                      className: 'dvp-btn', type: 'button',
+                      onClick: function () { toggleSkill(cell.name, !cell.installed) },
+                      title: cell.installed ? '从注册目录里摘掉这个技能（记进 state.json，重启后仍生效）' : '装回这个技能（免重启即时生效）',
+                    }, cell.installed ? '拔掉' : '装回'),
+                  ),
+                  h('div', { style: { fontSize: '11.5px', lineHeight: 1.6, color: 'var(--dsw-alias-label-tertiary)' } }, cell.description),
+                )
+              }),
+            ),
+        ),
+
+        // ── 验收入口（保留 v0.7.x 的能力）────────────────────────────────────
+        h('div', { style: secStyle, 'data-dvp-set-preview': '1' },
+          h('div', { style: h3Style }, '验收'),
+          h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
+            h('a', { className: 'dvp-btn', href: '/dvp/preview/', target: '_blank', rel: 'noreferrer', style: { display: 'inline-flex', alignItems: 'center', textDecoration: 'none', height: '28px', padding: '0 11px', borderRadius: '8px', border: '1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3))', color: 'var(--dsw-alias-label-primary)', fontSize: '12px' } }, '打开组件预览页'),
+            h('a', { className: 'dvp-btn', href: '/dvp/state', target: '_blank', rel: 'noreferrer', style: { display: 'inline-flex', alignItems: 'center', textDecoration: 'none', height: '28px', padding: '0 11px', borderRadius: '8px', border: '1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3))', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } }, '宿主状态 JSON (/dvp/state)'),
+          ),
         ),
       )
     }
@@ -2261,12 +2454,13 @@ window.__ModuleLoader__.load({
         problems.push('conversation.input.right: ' + String((err && err.message) || err))
       }
 
-      // 设置页卡片：验收入口
+      // 设置页卡片（v0.8.0）：任务记录、生图逻辑（A）、执行 AI（B）、技能电池都在这页；
+      // 对话页面板只留素材与请求准备。验收入口（预览页 / state JSON）仍在页内最下方。
       try {
         slots.inject('settings.section', function () {
           return slots.register(
             { name: 'settings.section', id: 'video-prompt', order: 59, label: '图片 / 视频提示词' },
-            PreviewSettingsPage,
+            SettingsPage,
           )
         })
       } catch (err) {
@@ -2298,6 +2492,13 @@ window.__ModuleLoader__.load({
       GROK_OPTIONS: GROK_OPTIONS,
       IMAGE_ENGINES: IMAGE_ENGINES,
       engineDef: engineDef,
+      EXECUTOR_AIS: EXECUTOR_AIS,
+      executorDef: executorDef,
+      tabKinds: tabKinds,
+      HOWTO_STEPS: HOWTO_STEPS,
+      runKindLabel: runKindLabel,
+      runWhen: runWhen,
+      SettingsPage: SettingsPage,
       PIPELINE_MODES: PIPELINE_MODES,
       VideoPromptPanel: VideoPromptPanel,
       // 草稿（内存）：面板收起/关掉不该丢用户输入。测试缝用来断言"存了没、恢复对不对、清了没"。
