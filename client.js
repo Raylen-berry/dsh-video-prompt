@@ -159,6 +159,10 @@ window.__ModuleLoader__.load({
       '.dvp-cols[data-dvp-cols="1"]{--dvp-col-n:1}',
       '.dvp-cols[data-dvp-cols="2"]{--dvp-col-n:2}',
       '.dvp-cols[data-dvp-cols="3"]{--dvp-col-n:3}',
+      // v0.8.0 补丁：素材列默认收起（.dvp-body[data-dvp-collapsed="1"]），中段只有这一行摘要，
+      // 面板高度由 layoutPanel 按实际内容算（不给 220px 下限），所以整块面板是矮的。
+      '.dvp-mediaBar{align-items:center}',
+      '.dvp-body[data-dvp-collapsed="1"]{gap:0}',
       '.dvp-col{border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.22));border-radius:10px;display:flex;flex-direction:column;min-height:0;overflow:hidden}',
       // 三类素材区要一眼分得开（用户 2026-09-14）：左侧 3px 色条，视频=品牌蓝 / 图片=绿 / 文档=琥珀
       '.dvp-col[data-kind=video]{border-left:3px solid color-mix(in srgb,var(--dsw-alias-state-business-primary,#4d6bfe) 60%,transparent)}',
@@ -379,7 +383,15 @@ window.__ModuleLoader__.load({
           if (listCount > 0 && lists[li].children[0].offsetHeight > itemH) itemH = lists[li].children[0].offsetHeight
         }
       }
-      if (maxItems > 0) {
+      // 素材列收起（v0.8.1）：中段只有一行摘要，自然高度就量那一行。
+      // 这里**不能**落到 `body.scrollHeight` —— 它是被上一次写进去的行内高度撑着的
+      //（展开时 283px），收起后会被当成"自然高度"原样写回去，面板永远卡在展开时的高个子
+      //（真机上实测到：收起后 body 还是 283px）。老坑同源（见上一段注释）。
+      var collapsed = !!(body.dataset && body.dataset.dvpCollapsed === '1')
+      var bar = collapsed && typeof body.querySelector === 'function' ? body.querySelector('.dvp-mediaBar') : null
+      if (collapsed) {
+        natural = bar ? Math.max(bar.offsetHeight || 0, bar.scrollHeight || 0, 44) : 44
+      } else if (maxItems > 0) {
         var rowH = itemH > 20 ? itemH : 50
         natural = 42 + Math.max(132, Math.min(listCap, maxItems * (rowH + 2) + 12))
       } else if (cols) {
@@ -391,8 +403,14 @@ window.__ModuleLoader__.load({
       // 装不下：**中段不压到 natural 以下** —— 压矮只会把列表底缘连同滑块裁掉
       // （"四个文件滚不动"的真成因），改为让面板整体滚：按钮仍滚得出来、点得到，
       // 列表与滑块完整可见。
-      var fits = chrome + natural <= limit
-      var floor = Math.min(PANEL_BODY_MIN, Math.max(48, available))
+      // 比对的"能装多高"要跟面板自己的**定高**取小：CSS 里 .dvp-panel{height:min(560px,100dvh-48px)}，
+      // 只比 --dvp-room（可能 700+）会让"内容 637 > 定高 560"被判成装得下 ⇒ overflowY:hidden
+      // ⇒ 页脚按钮被裁在可视区外还滚不到（v0.8.1 自查时用真 DOM 抓到）。
+      var panelCap = Math.min(560, Math.max(240, (window.innerHeight || 0) - 48))
+      var fits = chrome + natural <= Math.min(limit, panelCap)
+      // 素材列收起时中段只有一行摘要 ⇒ 不给 220px 下限（生文案栏目的两个输入框、
+      // 展开后的列表仍按老口径垫到 PANEL_BODY_MIN）。
+      var floor = collapsed ? Math.min(48, Math.max(24, available)) : Math.min(PANEL_BODY_MIN, Math.max(48, available))
       var target = fits ? Math.max(floor, Math.min(natural, available)) : natural
       body.style.height = target + 'px'
       // 列表跟着中段实测高走：列头占 ~42px，其余全给列表（下限 64、上限 30vh/280）。
@@ -918,6 +936,13 @@ window.__ModuleLoader__.load({
       var sourceOpenState = useState(false)
       var sourceOpen = sourceOpenState[0]
       var setSourceOpen = sourceOpenState[1]
+      // 素材列默认收起（v0.8.0 补丁，用户 2026-09-17："素材列不要常驻"）：默认只留一行摘要
+      //（素材 图片 45 · 文档 0 · 已勾 45），点「展开列表」才把列表拉出来勾选。收起时不渲染
+      // `.dvp-cols`，面板高度跟着变矮（layoutPanel 认 data-dvp-collapsed）。
+      // mediaOpenDefault 只给测试/预览页当入口（真面板每次都从收起态开），也不进草稿 —— 收起是默认态。
+      var mediaOpenState = useState(props.mediaOpenDefault === true)
+      var mediaOpen = mediaOpenState[0]
+      var setMediaOpen = mediaOpenState[1]
       // 扫描深度（给定目录之外的递归层数），默认 4 层：素材常按"一部剧/一本书一个子目录"摆
       var depthState = useState('4')
       var depth = depthState[0]
@@ -1711,13 +1736,58 @@ window.__ModuleLoader__.load({
       /** 素材区（按栏目过滤后的列）：**紧跟"挑文件夹"那一行**。
        *  v0.8.0：列数跟着栏目走 —— 生图=图片+文档两列、生视频=视频一列、爆款分析=视频+图片两列；
        *  「执行选择」（B 状态 + 档位 + 引擎 D）永远排在它下面（用户："引擎应该最后才选择"）。
-       *  列容器用 grid-template-columns:repeat(N,1fr)（data-dvp-cols 决定 N），CSS 见 .dvp-cols。 */
+       *  列容器用 grid-template-columns:repeat(N,1fr)（data-dvp-cols 决定 N），CSS 见 .dvp-cols。
+       *  v0.8.0 补丁（用户："素材列不要常驻"）：**默认收起**成一栏摘要（data-dvp-collapsed="1"，
+       *  不给 .dvp-cols ⇒ 面板高度自动变矮），点「展开列表 ▸」才渲染列表；再点「收起列表 ▾」收回去。
+       *  生文案栏目不吃素材（tabKinds 为空）⇒ 整块返回 null，不留空壳。 */
       function renderMaterialBody() {
+        if (tabKindsNow.length === 0) return null
+        var parts = []
+        var total = 0
+        var chosenNow = 0
+        if (tabKindsNow.indexOf('video') >= 0) {
+          parts.push(VIDEO_LABEL + ' ' + videos.length)
+          total += videos.length
+          chosenNow += chosenVideos
+        }
+        if (tabKindsNow.indexOf('image') >= 0) {
+          parts.push(IMAGE_LABEL + ' ' + images.length)
+          total += images.length
+          chosenNow += chosenImages
+        }
+        if (tabKindsNow.indexOf('text') >= 0) {
+          parts.push(TEXT_LABEL + ' ' + texts.length)
+          total += texts.length
+          chosenNow += chosenDocs
+        }
+        var head = h('div', { className: 'dvp-sectHead' },
+          h('span', { className: 'dvp-sectTitle' }, '素材'),
+          h('span', { className: 'dvp-sub', 'data-dvp-media-summary': '1' },
+            parts.join(' · ')
+            + (chosenNow ? ' · 已勾 ' + chosenNow : '')
+            + (total === 0 ? '（点「扫描」看这一层有什么）' : '')),
+          h('div', { style: { flex: '1' } }),
+          h('button', {
+            className: 'dvp-btn',
+            type: 'button',
+            'data-dvp-media-toggle': mediaOpen ? 'close' : 'open',
+            title: mediaOpen
+              ? '收起素材列表（收起后只留这一行摘要，面板恢复紧凑）'
+              : '展开素材列表，勾选要分析/要生图的素材',
+            onClick: function () { setMediaOpen(!mediaOpen) },
+          }, mediaOpen ? '收起列表 ▾' : '展开列表 ▸'),
+        )
+        if (!mediaOpen) {
+          return h('div', { className: 'dvp-body', 'data-dvp-collapsed': '1', 'data-dvp-media': 'closed' },
+            h('div', { className: 'dvp-sect dvp-mediaBar' }, head),
+          )
+        }
         var cols = []
-        if (tabKindsNow.indexOf('video') >= 0) cols.push(renderColumn(VIDEO_LABEL, videos, 'video'))
-        if (tabKindsNow.indexOf('image') >= 0) cols.push(renderColumn(IMAGE_LABEL, images, 'image'))
-        if (tabKindsNow.indexOf('text') >= 0) cols.push(renderColumn(TEXT_LABEL, texts, 'text'))
-        return h('div', { className: 'dvp-body' },
+        if (tabKindsNow.indexOf('video') >= 0) cols.push(renderColumn(VIDEO_LABEL, colVideos, 'video'))
+        if (tabKindsNow.indexOf('image') >= 0) cols.push(renderColumn(IMAGE_LABEL, colImages, 'image'))
+        if (tabKindsNow.indexOf('text') >= 0) cols.push(renderColumn(TEXT_LABEL, colTexts, 'text'))
+        return h('div', { className: 'dvp-body', 'data-dvp-collapsed': '0', 'data-dvp-media': 'open' },
+          h('div', { className: 'dvp-sect dvp-mediaBar' }, head),
           h('div', { className: 'dvp-cols', 'data-dvp-cols': String(cols.length) }, cols),
         )
       }

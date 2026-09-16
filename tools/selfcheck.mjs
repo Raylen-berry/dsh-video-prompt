@@ -363,6 +363,10 @@ React.useEffect = () => {}
 const panelHtml = ReactDOMServer.renderToStaticMarkup(
   React.createElement(exportsObj.internals.VideoPromptPanel, { mediaRoot: 'D:/media', runsRoot: 'D:/runs' }),
 )
+// 素材列表展开态（v0.8.0 补丁）：收起是默认态，列表要另渲染一份才验得到列
+const panelOpenHtml = ReactDOMServer.renderToStaticMarkup(
+  React.createElement(exportsObj.internals.VideoPromptPanel, { mediaRoot: 'D:/media', runsRoot: 'D:/runs', mediaOpenDefault: true }),
+)
 React.useEffect = realUseEffect
 
 ok('渲染出面板容器', panelHtml.includes('dvp-panel'))
@@ -390,17 +394,37 @@ ok('默认态主按钮是「准备生图请求」', panelHtml.includes('准备�
 // 面板底部另有独立的「清空草稿」入口（收起/关闭面板一律保留草稿，不再需要关闭确认框）。
 ok('主按钮不再叫「派发到会话 / 生成爆款元素」', !panelHtml.includes('派发到会话') && !panelHtml.includes('生成爆款元素'))
 ok('底部有「清空草稿」入口', panelHtml.includes('清空草稿'))
-// 素材分流：v0.8.0「非常驻」——列跟着栏目走，默认生图栏目 = 图片 + 文档两列（视频不在这一栏分析）
-ok('生图栏目只列图片+文档两列', panelHtml.includes('dvp-cols') && (panelHtml.match(/dvp-col"/g) || []).length === 2, (panelHtml.match(/dvp-col"/g) || []).length)
+// 素材分流：v0.8.0「非常驻」两件事 —— ①默认收起成一行摘要（用户 2026-09-17："素材列不要常驻"）；
+// ②列跟着栏目走（生图 = 图片 + 文档两列，视频不在这一栏分析；爆款分析 = 视频 + 图；生视频 = 视频）。
+ok('素材列默认收起（data-dvp-collapsed=1，且一个 .dvp-cols 都不渲染）',
+  panelHtml.includes('data-dvp-collapsed="1"') && !panelHtml.includes('dvp-cols'), panelHtml.includes('dvp-cols'))
+ok('收起态给「展开列表 ▸」入口', panelHtml.includes('data-dvp-media-toggle="open"') && panelHtml.includes('展开列表'))
+ok('收起态是 data-dvp-media="closed"', panelHtml.includes('data-dvp-media="closed"'))
+ok('收起态摘要报当前栏目各类数量（生图 = 图片 + 文档）',
+  /data-dvp-media-summary="1">图片 0 · 文档 0/.test(panelHtml), (panelHtml.match(/data-dvp-media-summary="1">([^<]*)/) || [])[1])
+ok('素材为空时摘要给「点扫描」提示', panelHtml.includes('（点「扫描」看这一层有什么）'))
+ok('收起态不给 220px 中段下限（面板跟着变矮）',
+  /body\.dataset\.dvpCollapsed === '1'/.test(source) && /collapsed \? Math\.min\(48,/.test(source))
+ok('收起态不用 body.scrollHeight 当自然高（否则卡在展开时的高度）',
+  /var collapsed = !!\(body\.dataset && body\.dataset\.dvpCollapsed === '1'\)[\s\S]{0,400}if \(collapsed\) \{[\s\S]{0,200}bar\.scrollHeight/.test(source))
+ok('展开列表的开关只改 mediaOpen（不改勾选）', /onClick: function \(\) \{ setMediaOpen\(!mediaOpen\) \}/.test(source))
+ok('展开后按栏目渲染列（生图 = 图片 + 文档两列）',
+  panelOpenHtml.includes('data-dvp-media="open"') && (panelOpenHtml.match(/class="dvp-col"/g) || []).length === 2,
+  (panelOpenHtml.match(/class="dvp-col"/g) || []).length)
+ok('展开态给「收起列表 ▾」入口', panelOpenHtml.includes('data-dvp-media-toggle="close"') && panelOpenHtml.includes('收起列表'))
+ok('展开态的列还带着栏目映射的 data-kind',
+  panelOpenHtml.includes('data-kind="image"') && panelOpenHtml.includes('data-kind="text"') && !panelOpenHtml.includes('data-kind="video"'))
 ok('列数由 data-dvp-cols 驱动（1/2/3 三档 CSS）', /\.dvp-cols\[data-dvp-cols="1"\]\{--dvp-col-n:1\}/.test(source)
   && /\.dvp-cols\[data-dvp-cols="2"\]\{--dvp-col-n:2\}/.test(source) && /\.dvp-cols\[data-dvp-cols="3"\]\{--dvp-col-n:3\}/.test(source))
-ok('列容器把列数写进 DOM（data-dvp-cols）', /'data-dvp-cols': String\(tabKindsNow\.length\)/.test(source) || /'data-dvp-cols':/.test(source))
+ok('列容器把列数写进 DOM（data-dvp-cols）',
+  panelOpenHtml.includes('data-dvp-cols="2"') && /'data-dvp-cols': String\(cols\.length\)/.test(source))
 ok('tabKinds 映射齐全（copy=[]、viral=视频+图、image=图+文档、video=视频）',
   exportsObj.internals.tabKinds('copy').join(',') === ''
   && exportsObj.internals.tabKinds('viral').join(',') === 'video,image'
   && exportsObj.internals.tabKinds('image').join(',') === 'image,text'
   && exportsObj.internals.tabKinds('video').join(',') === 'video')
-ok('文档列有独立的空态说明', panelHtml.includes('md / txt / srt'))
+ok('生文案栏目没有素材列（tabKinds 为空时整块不渲染）', /if \(tabKindsNow\.length === 0\) return null/.test(source))
+ok('文档列有独立的空态说明', panelOpenHtml.includes('md / txt / srt'))
 ok('CSS 网格按列数变量排（repeat(var(--dvp-col-n,3),1fr)）', source.includes('.dvp-cols{display:grid;grid-template-columns:repeat(var(--dvp-col-n,3),1fr)'))
 ok('面板里有「来源文本」区块', panelHtml.includes('来源文本'))
 // 正文框默认收起（展开要占 64px+，窄屏会把底部按钮挤出面板），所以断言收起态的样子
@@ -614,11 +638,20 @@ const p1 = fakePanel()
 layout(p1, 572)
 ok('空间不足时中段保持自然高度、面板整体滚（不再裁列表底缘）', p1.body.style.height === '251px', p1.body.style.height)
 ok('放不下时面板整体可滚（按钮滚得出来）', p1.style.overflowY === 'auto' && p1.dataset.tight === 'true', JSON.stringify(p1.style) + JSON.stringify(p1.dataset))
-// limit 900 → available = 900-317-70-28 = 485 > 自然 251 → 取 251（不拉长，不出现空档）
+// limit 900（room）但面板 CSS 定高是 min(560px, 100dvh-48px) = 560：
+// chrome 415 + natural 251 = 666 > 560 ⇒ 装不下 ⇒ 面板整体可滚（否则 overflowY:hidden 会把页脚裁掉）
 const p2 = fakePanel()
 layout(p2, 900)
 ok('空间充足时中段保持自然高度', p2.body.style.height === '251px', p2.body.style.height)
-ok('放得下时面板不加滚动条', p2.style.overflowY === 'hidden' && p2.dataset.tight === 'false', JSON.stringify(p2.style))
+ok('内容高过面板定高时面板可滚（页脚滚得出来）',
+  p2.style.overflowY === 'auto' && p2.dataset.tight === 'true', JSON.stringify(p2.style) + JSON.stringify(p2.dataset))
+// 内容真的装得下（chrome 415 + natural 100 = 515 ≤ 560）⇒ 不加滚动条
+const p2b = fakePanel({ natural: 100 })
+layout(p2b, 900)
+ok('放得下时面板不加滚动条', p2b.style.overflowY === 'hidden' && p2b.dataset.tight === 'false', JSON.stringify(p2b.style))
+ok('面板定高比 room 小时以定高为准（cap 参与判定）',
+  /var panelCap = Math\.min\(560, Math\.max\(240, \(window\.innerHeight \|\| 0\) - 48\)\)/.test(source)
+  && /chrome \+ natural <= Math\.min\(limit, panelCap\)/.test(source))
 // limit 300 → available 负数 → 中段仍是自然高度 251，靠面板整体滚动看全（压成 48 只会把内容裁没）
 const p3 = fakePanel()
 layout(p3, 300)
@@ -629,6 +662,23 @@ sandbox.window = { innerWidth: 1424, innerHeight: 805, addEventListener: () => {
 const p4 = fakePanel()
 layout(p4, 0)
 ok('没有 room 时退到 100dvh-48px 计算', p4.body.style.height === '251px', p4.body.style.height)
+// v0.8.0 补丁：素材列收起（data-dvp-collapsed=1）时中段只有一行摘要 ⇒ 不给 220 下限，面板跟着变矮
+const pCollapsed = fakePanel({ natural: 44 })
+pCollapsed.body.dataset = { dvpCollapsed: '1' }
+layout(pCollapsed, 900)
+ok('素材列收起时中段只占 48px（面板跟着变矮）', pCollapsed.body.style.height === '48px', pCollapsed.body.style.height)
+const pCollapsedTight = fakePanel({ natural: 44 })
+pCollapsedTight.body.dataset = { dvpCollapsed: '1' }
+layout(pCollapsedTight, 572)
+ok('收起态在空间不足时也不撑到 220', pCollapsedTight.body.style.height === '48px', pCollapsedTight.body.style.height)
+// 真机回归（0.8.1 自查时抓到）：展开过再收起，body.scrollHeight 还是展开时的 283px ——
+// 拿它当"自然高度"就把面板钉在高个子上。收起态必须量摘要行本身。
+const pStale = fakePanel({ natural: 0 })
+pStale.body.dataset = { dvpCollapsed: '1' }
+pStale.body.scrollHeight = 283
+pStale.body.querySelector = (sel) => (sel === '.dvp-mediaBar' ? { offsetHeight: 48, scrollHeight: 48 } : null)
+layout(pStale, 900)
+ok('收起态量的是摘要行，不是 body.scrollHeight（283 不许被沿用）', pStale.body.style.height === '48px', pStale.body.style.height)
 sandbox.window = realWindow
 ok('缺中段时安全返回', layout({ querySelector: () => null }, 572) === undefined)
 ok('layoutPanel 由 flip 内部调用（不需要额外 effect）', /layoutPanel\(panel, room\)/.test(source), '')

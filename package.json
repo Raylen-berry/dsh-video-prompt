@@ -1,6 +1,6 @@
 {
   "name": "dsh-video-prompt",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "视频/图片提示词流水线：对话框旁的图片、视频提示词模式入口（扫描媒体文件夹、分流图片与视频、逐个产出可复制的生成提示词），角色链 A→B→C→D→E 可选（执行 AI + 生图引擎），并注册 video-prompt-pipeline / image-prompt-director 等 7 个技能包。",
   "keywords": [
     "dsh",
