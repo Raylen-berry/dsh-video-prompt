@@ -50,6 +50,8 @@ function section(title) {
 section('1) client.js · module loader 契约')
 
 const source = readFileSync(path.join(PKG, 'client.js'), 'utf8')
+// 宿主半边（index.js）也逐条对齐：路由、driverDoc、entries 白名单都在这一份里
+const HOST_SRC = readFileSync(path.join(PKG, 'index.js'), 'utf8')
 const React = require2('react')
 
 let loaded = null
@@ -135,12 +137,24 @@ ok('引用了 video-prompt-pipeline 技能', text.includes('video-prompt-pipelin
 ok('写明素材目录', text.includes('D:/media'))
 ok('写明产物目录', text.includes('D:/runs'))
 ok('统计口径正确（图片 2 视频 1）', text.includes('图片 2 个') && text.includes('视频 1 个'))
-ok('要求图片出图片提示词', text.includes('图片 → 产出「图片生成提示词」'))
-ok('要求视频出视频提示词', text.includes('视频 → 按 video-prompt-pipeline'))
+// v0.9.0 四种路径：栏目 = 产物类型，素材 = 图/视频都行（用户："视频和图片都得能生成图片或者视频，
+// 两两交互，四种路径"）。默认产物 = 图片（生图栏）。
+ok('默认产物是图片提示词（写明本栏产物）', text.includes('本栏产物：') && text.includes('「图片生成提示词」'))
+ok('路径① 图生图：图片素材出图片提示词', text.includes('图片素材 → 产出「图片生成提示词」（图生图）'))
+ok('路径② 视频生图：视频素材先抽帧再出图片提示词', text.includes('视频素材 → 产出「图片生成提示词」（视频生图）') && text.includes('watch 抽帧'))
 ok('逐项清单含文件路径与类型标记', text.includes('[图片] D:/media/images/a.png') && text.includes('[视频] D:/media/videos/c.mp4'))
 ok('要求不静默省略', text.includes('不要静默省略'))
 ok('视频排在图片之后（先图后视频的稳定顺序）', text.indexOf('a.png') < text.indexOf('c.mp4'))
 ok('体积有可读化', text.includes('200 KB') || text.includes('200KB'))
+// 同一条素材、换产物类型 ⇒ 整段话术跟着换（产物那一维）
+const textVideoOut = exportsObj.internals.buildDispatchRequest(items, 'D:/media', 'D:/runs', '', '', 'video')
+ok('产物=视频时本栏产物行跟着换', textVideoOut.includes('「视频生成提示词」') && textVideoOut.includes('视频生视频') && textVideoOut.includes('图生视频'))
+ok('路径③ 视频生视频：视频素材出时间码分镜提示词', textVideoOut.includes('视频素材 → 产出「视频生成提示词」（视频生视频）') && textVideoOut.includes('时间码分镜'))
+ok('路径④ 图生视频：图片素材当首帧/参考', textVideoOut.includes('图片素材 → 产出「视频生成提示词」（图生视频）') && textVideoOut.includes('首帧'))
+ok('产物文件名跟着产物类型变', textVideoOut.includes('optimized-video-prompt.md') && text.includes('optimized-image-prompt.md'))
+ok('tabOutKind 只认产物栏目（生图=image、生视频=video，生文案/爆款=null）',
+  exportsObj.internals.tabOutKind('image') === 'image' && exportsObj.internals.tabOutKind('video') === 'video'
+  && exportsObj.internals.tabOutKind('copy') === null && exportsObj.internals.tabOutKind('viral') === null)
 
 // ── 3a2. 文档（md/txt）进派发 —— 用户报"生图插件不能识别 md 文档" ──────────
 section('3a2) 文档进派发请求')
@@ -156,6 +170,9 @@ ok('过程目录写进派发请求（含时间命名说明）', textDocs.include
 ok('视频抽帧归位到过程目录 frames', textDocs.includes('frames'))
 const textNoDocs = exportsObj.internals.buildDispatchRequest(items, 'D:/media', 'D:/runs')
 ok('没勾文档时请求里不出现文档段落', !textNoDocs.includes('[文档]') && !textNoDocs.includes('文档 1 个'))
+// 文档也按产物类型给不同口径：出图按情节、出视频按章节分段
+const docVideoOut = exportsObj.internals.buildDispatchRequest(itemsWithDocs, 'D:/media', 'D:/runs', PROC, '', 'video')
+ok('文档在生视频栏改成按章纲分段出分镜', docVideoOut.includes('先读全文当章纲') && docVideoOut.includes('分段'))
 
 // ── 3g. 爆款元素路径（蒸馏）──────────────────────────────────────────────────
 section('3g) 爆款元素（蒸馏）派发文案')
@@ -187,7 +204,10 @@ ok('不勾文档/无过程目录时这些行不出现', !grokNoDocs.includes('�
 section('3b) Grok 出图派发文案')
 
 const grokText = exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output')
-ok('只要图片（视频不进批次）', grokText.includes('待出图：2 张') && !grokText.includes('c.mp4'))
+// v0.9.0：出图批次收**图片与视频**两种素材（视频先抽帧、按关键帧写 C，再由引擎出图 E）
+ok('出图批次收图片与视频两种素材（视频生图）', grokText.includes('待出图：3 张（图片 2 · 视频 1）'))
+ok('出图清单标明素材类型（[视频] c.mp4）', grokText.includes('[视频] c.mp4') && grokText.includes('[图片] a.png'))
+ok('视频素材给出抽帧口径（帧只当依据）', grokText.includes('视频素材 1 个') && grokText.includes('抽帧') && grokText.includes('不要把整段视频当一张图'))
 ok('写明批次目录', grokText.includes('D:/runs/grok-output'))
 ok('写明落盘路由 /dvp/grok/save', grokText.includes('/dvp/grok/save'))
 ok('要求用 Edge 登录态', grokText.includes('use:"edge"') && grokText.includes('grok.com'))
@@ -400,29 +420,30 @@ ok('素材列默认收起（data-dvp-collapsed=1，且一个 .dvp-cols 都不渲
   panelHtml.includes('data-dvp-collapsed="1"') && !panelHtml.includes('dvp-cols'), panelHtml.includes('dvp-cols'))
 ok('收起态给「展开列表 ▸」入口', panelHtml.includes('data-dvp-media-toggle="open"') && panelHtml.includes('展开列表'))
 ok('收起态是 data-dvp-media="closed"', panelHtml.includes('data-dvp-media="closed"'))
-ok('收起态摘要报当前栏目各类数量（生图 = 图片 + 文档）',
-  /data-dvp-media-summary="1">图片 0 · 文档 0/.test(panelHtml), (panelHtml.match(/data-dvp-media-summary="1">([^<]*)/) || [])[1])
+ok('收起态摘要报当前栏目各类数量（生图 = 视频 + 图片 + 文档）',
+  /data-dvp-media-summary="1">视频 0 · 图片 0 · 文档 0/.test(panelHtml), (panelHtml.match(/data-dvp-media-summary="1">([^<]*)/) || [])[1])
 ok('素材为空时摘要给「点扫描」提示', panelHtml.includes('（点「扫描」看这一层有什么）'))
 ok('收起态不给 220px 中段下限（面板跟着变矮）',
   /body\.dataset\.dvpCollapsed === '1'/.test(source) && /collapsed \? Math\.min\(48,/.test(source))
 ok('收起态不用 body.scrollHeight 当自然高（否则卡在展开时的高度）',
   /var collapsed = !!\(body\.dataset && body\.dataset\.dvpCollapsed === '1'\)[\s\S]{0,400}if \(collapsed\) \{[\s\S]{0,200}bar\.scrollHeight/.test(source))
 ok('展开列表的开关只改 mediaOpen（不改勾选）', /onClick: function \(\) \{ setMediaOpen\(!mediaOpen\) \}/.test(source))
-ok('展开后按栏目渲染列（生图 = 图片 + 文档两列）',
-  panelOpenHtml.includes('data-dvp-media="open"') && (panelOpenHtml.match(/class="dvp-col"/g) || []).length === 2,
+ok('展开后按栏目渲染列（生图 = 视频 + 图片 + 文档三列）',
+  panelOpenHtml.includes('data-dvp-media="open"') && (panelOpenHtml.match(/class="dvp-col"/g) || []).length === 3,
   (panelOpenHtml.match(/class="dvp-col"/g) || []).length)
 ok('展开态给「收起列表 ▾」入口', panelOpenHtml.includes('data-dvp-media-toggle="close"') && panelOpenHtml.includes('收起列表'))
-ok('展开态的列还带着栏目映射的 data-kind',
-  panelOpenHtml.includes('data-kind="image"') && panelOpenHtml.includes('data-kind="text"') && !panelOpenHtml.includes('data-kind="video"'))
+ok('展开态的列带着栏目映射的 data-kind（视频/图片/文档三条都在）',
+  panelOpenHtml.includes('data-kind="image"') && panelOpenHtml.includes('data-kind="text"') && panelOpenHtml.includes('data-kind="video"'))
 ok('列数由 data-dvp-cols 驱动（1/2/3 三档 CSS）', /\.dvp-cols\[data-dvp-cols="1"\]\{--dvp-col-n:1\}/.test(source)
   && /\.dvp-cols\[data-dvp-cols="2"\]\{--dvp-col-n:2\}/.test(source) && /\.dvp-cols\[data-dvp-cols="3"\]\{--dvp-col-n:3\}/.test(source))
 ok('列容器把列数写进 DOM（data-dvp-cols）',
-  panelOpenHtml.includes('data-dvp-cols="2"') && /'data-dvp-cols': String\(cols\.length\)/.test(source))
-ok('tabKinds 映射齐全（copy=[]、viral=视频+图、image=图+文档、video=视频）',
+  panelOpenHtml.includes('data-dvp-cols="3"') && /'data-dvp-cols': String\(cols\.length\)/.test(source))
+// v0.9.0 四种路径：素材那一维两栏都吃图/视频（生图栏多一列文档）
+ok('tabKinds 映射齐全（copy=[]、viral=视频+图、image=视频+图+文档、video=视频+图）',
   exportsObj.internals.tabKinds('copy').join(',') === ''
   && exportsObj.internals.tabKinds('viral').join(',') === 'video,image'
-  && exportsObj.internals.tabKinds('image').join(',') === 'image,text'
-  && exportsObj.internals.tabKinds('video').join(',') === 'video')
+  && exportsObj.internals.tabKinds('image').join(',') === 'video,image,text'
+  && exportsObj.internals.tabKinds('video').join(',') === 'video,image')
 ok('生文案栏目没有素材列（tabKinds 为空时整块不渲染）', /if \(tabKindsNow\.length === 0\) return null/.test(source))
 ok('文档列有独立的空态说明', panelOpenHtml.includes('md / txt / srt'))
 ok('CSS 网格按列数变量排（repeat(var(--dvp-col-n,3),1fr)）', source.includes('.dvp-cols{display:grid;grid-template-columns:repeat(var(--dvp-col-n,3),1fr)'))
@@ -457,13 +478,25 @@ ok('大纲有 A/B/C/D/E 角色链一节（v0.8.0）', source.includes('角色链
 ok('layoutPanel 里没有 howto 特例分支了（isHowto 判定已删）', !/isHowto/.test(source))
 // v0.5.0：发送前体积提示（请求字数 + 估算 token + 素材数 + "正文不进请求"）
 ok('页脚有体积提示位（sizeHint）', /function sizeHint\(\)/.test(source) && /h\('div', \{ className: 'dvp-hint' \}, sizeHint\(\)\)/.test(source))
-ok('体积提示用与派发同一批构建器算预览（v0.8.0 带上 B）',
+ok('体积提示用与派发同一批构建器算预览（v0.9.0 带上产物类型与来源引用）',
   /var requestPreview = useMemo\(/.test(source)
-  && /buildDispatchRequest\(items, sourceDir\(\), runsRoot, '', executorAI\)/.test(source)
+  && /buildDispatchRequest\(items, sourceDir\(\), runsRoot, '', executorAI, tabOutKind\(tab\), previewRef\)/.test(source)
   && /buildViralRequest\(items, sourceDir\(\), runsRoot, '', executorAI\)/.test(source)
   && /buildCopyRequest\(copyBookList\(\), copyPrompt\.trim\(\), runsRoot, '', executorAI\)/.test(source))
 ok('token 只标估算（不装精确）', /token，估算/.test(source))
 ok('提示里写明正文只带路径与字数', /正文不进请求/.test(source))
+// v0.9.0 四种路径的接线：素材那一维两栏都吃图/视频，产物那一维由栏目定
+ok('「用 X 生图」的可用条件是"图片 + 视频"（不再只认图片）',
+  /disabled: chosenImages \+ chosenVideos === 0/.test(source) && /出图至少要勾一个素材/.test(source))
+ok('出图派发把图片与视频都当素材（dispatchGrok 不再只取图片）',
+  /var mats = chosenOf\(chosen, 'image'\)\.concat\(chosenOf\(chosen, 'video'\)\)/.test(source))
+ok('出图批次条目带上素材类型（kind 跟着 entries 落盘）', /kind: item\.kind/.test(source))
+ok('生视频栏不再只算视频（派发与复制都用本栏全部勾选）', !/tab === 'video' \? chosenOf\(chosen, 'video'\)/.test(source))
+ok('来源文本接进两条产物线的派发请求（生视频栏不再是死区块）',
+  /function ensureSourceRef\(cb\)/.test(source)
+  && /buildDispatchRequest\(chosen, sourceDir\(\), runsRoot, processDir, executorAI, tabOutKind\(tab\), sourceRef\)/.test(source))
+ok('宿主 driverDoc 认条目类型（视频条目要点名先抽帧）',
+  /视频素材 ' \+ videoEntries\.length \+ ' 条/.test(HOST_SRC) && /entry\.kind === 'video' \? '视频（先抽帧，按关键帧写 C）'/.test(HOST_SRC))
 // v0.6.0：任务记录（人看的那份）—— v0.8.0 搬进**设置页**，面板不再渲染。
 ok('设置页有任务记录区块与四列表头', /'data-dvp-set-runs': '1'/.test(source) && /时间 · 类型 · 项数 · 过程目录/.test(source))
 ok('面板里不再有任务记录区块（渲染函数与 runs 状态都撤了）',

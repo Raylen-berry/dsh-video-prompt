@@ -436,9 +436,34 @@ const planExecBBad = await (await fetch(BASE + '/dvp/grok/plan', {
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ grokUrl: 'https://grok.com/', slug: 'b-dirty', executorAI: 'gpt-4o', entries: [{ index: 1, title: '脏 B', slug: 'b-dirty', prompt: 'p' }] }),
 })).json()
-ok('非法 B 值进批次时退默认 self（不写脏值）', planExecBBad.executorAI === 'self'
-  && JSON.parse(await fsp.readFile(planExecBBad.planFile, 'utf8')).executorAI === 'self', planExecBBad.executorAI)
+ok('非法 B 值进批次时退默认 self（不写脏值）', planExecBBad.executorAI === 'self' && JSON.parse(await fsp.readFile(planExecBBad.planFile, 'utf8')).executorAI === 'self', planExecBBad.executorAI)
 ok('没传 executorAI 的老调用方照常出批次（向后兼容）', planExecBBad.ok === true && existsSync(planExecBBad.driverFile))
+
+// v0.9.0 四种路径：出图批次也收**视频**素材（视频生图）—— 条目的 kind 必须落盘，
+// 驱动清单要点名"先抽帧再写 C"，否则会话侧会拿整段视频当一张图描述。
+const planKind = await (await fetch(BASE + '/dvp/grok/plan', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    grokUrl: 'https://grok.com/',
+    slug: 'video-kind',
+    processDir: 'D:/runs/process/2026-09-17_1200-video-kind',
+    entries: [
+      { index: 1, title: 'shot.png', slug: 'shot', source: 'D:/m/shot.png', prompt: 'p1', kind: 'image' },
+      { index: 2, title: 'clip.mp4', slug: 'clip', source: 'D:/m/clip.mp4', prompt: 'p2', kind: 'video' },
+    ],
+  }),
+})).json()
+const planKindOnDisk = JSON.parse(await fsp.readFile(planKind.planFile, 'utf8'))
+ok('plan.json 记住每个条目的素材类型（kind）',
+  planKindOnDisk.entries[0].kind === 'image' && planKindOnDisk.entries[1].kind === 'video',
+  planKindOnDisk.entries.map((e) => e.kind))
+const driverKind = await fsp.readFile(planKind.driverFile, 'utf8')
+ok('driver.md 点名视频素材要先抽帧（视频生图）',
+  driverKind.includes('视频素材 1 条') && driverKind.includes('抽帧') && driverKind.includes('frames'),
+  (driverKind.match(/视频素材[^\n]{0,80}/) || [])[0])
+ok('driver.md 逐条标出素材类型', driverKind.includes('- 素材类型：图片（图生图）') && driverKind.includes('- 素材类型：视频（先抽帧，按关键帧写 C）'))
+ok('没给 kind 的老调用方照常（不凭空写类型）', !driverSelfExecB.includes('- 素材类型：'))
 
 // ── 8b. 来源文本单独落盘 ────────────────────────────────────────────────────
 console.log('\n8b) /dvp/source · 来源文本落盘')

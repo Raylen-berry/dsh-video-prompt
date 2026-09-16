@@ -612,6 +612,13 @@ export function driverDoc(plan) {
     }
   }
   if (plan.sourceFile) lines.push('- 来源文本：' + plan.sourceFile)
+  // v0.9.0：出图批次也收视频素材（视频生图）—— 视频那几条要先抽帧再写 C，清单里点名。
+  const videoEntries = (Array.isArray(plan.entries) ? plan.entries : []).filter((e) => e && e.kind === 'video')
+  if (videoEntries.length > 0) {
+    lines.push('- 视频素材 ' + videoEntries.length + ' 条'
+      + (plan.processDir ? '：先用 watch 抽帧到 ' + path.join(plan.processDir, 'frames') + '\\<视频名>\\' : '：先用 watch 抽帧')
+      + '，挑关键帧（文件名带时间码）当依据写图片提示词（视频生图）；帧只当依据，不要把整段视频当一张图笼统描述。')
+  }
   lines.push('')
   lines.push('## 执行方式')
   lines.push('')
@@ -648,6 +655,7 @@ export function driverDoc(plan) {
     lines.push('### ' + entry.index + '. ' + (entry.title || entry.slug))
     lines.push('')
     lines.push('- 落盘文件名：`' + String(entry.index).padStart(2, '0') + '-' + entry.slug + '.png`')
+    if (entry.kind) lines.push('- 素材类型：' + (entry.kind === 'video' ? '视频（先抽帧，按关键帧写 C）' : entry.kind === 'text' ? '文档' : '图片（图生图）'))
     if (entry.source) lines.push('- 素材来源：`' + entry.source + '`')
     lines.push('')
     lines.push('```text')
@@ -2249,6 +2257,8 @@ export async function apply(ctx, rawConfig = {}) {
         slug: String(entry.slug || 'prompt').slice(0, 48),
         source: String(entry.source || ''),
         chars: String(entry.prompt || '').length,
+        // v0.9.0：出图批次里每条素材的类型（图片 / 视频 / 文档）—— 视频那条要先抽帧再写 C
+        ...(entry.kind === 'video' || entry.kind === 'image' || entry.kind === 'text' ? { kind: entry.kind } : {}),
       })),
     }
     await fsp.writeFile(path.join(dir, 'plan.json'), JSON.stringify(plan, null, 2), 'utf8')

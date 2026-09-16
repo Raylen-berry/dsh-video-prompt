@@ -83,6 +83,7 @@ export function renderDriverDoc(plan) {
     lines.push('### ' + entry.index + '. ' + (entry.title || entry.slug))
     lines.push('')
     lines.push('- 落盘文件名：`' + String(entry.index).padStart(2, '0') + '-' + entry.slug + '.<ext>`')
+    if (entry.kind) lines.push('- 素材类型：' + (entry.kind === 'video' ? '视频（先抽帧，按关键帧写 C）' : entry.kind === 'text' ? '文档' : '图片（图生图）'))
     if (entry.source) lines.push('- 素材来源：`' + entry.source + '`')
     if (entry.hash) lines.push('- 提示词指纹：`' + entry.hash + '`')
     lines.push('')
