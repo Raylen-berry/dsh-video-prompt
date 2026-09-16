@@ -2,7 +2,8 @@
 
 **生图流水线** —— DSH 对话框旁的一个模式入口（和 `dsh-ppt` 的 PPT 按钮同一按钮簇），
 选一批素材文件夹，面板按**图片 / 视频 / 文档**自动分流，勾选后派发给会话。
-两条路径二选一：主线按 `video-prompt-pipeline` 逐项产出提示词、再用 Grok 生图；
+两条路径二选一：主线按 `video-prompt-pipeline` 逐项产出提示词、再交给**面板上选定的生图引擎**
+（v0.7.0：Grok / ChatGPT·Edge 二选一）出图；
 新路径把视频/图片蒸馏成可复用的**爆款元素**。也可以粘小说正文按情节出图。
 
 ```
@@ -20,7 +21,7 @@
 
 | 栏目 | 主按钮 | 干什么 |
 | --- | --- | --- |
-| 生图（默认） | 准备生图请求 / 用 Grok 生图 | 素材 → 提示词 → 图片可再走 Grok 出图；明确要参考图时走 video-prompt-pipeline 的 Phase 3（浏览器 ChatGPT 出首帧+关键帧两张图） |
+| 生图（默认） | 准备生图请求 / 用「生图引擎」生图 | 素材 → 提示词 → 图片可再走**面板上选的引擎**出图（v0.7.0：Grok / ChatGPT·Edge）；明确要参考图时走 video-prompt-pipeline 的 Phase 3（浏览器 ChatGPT 出首帧+关键帧两张图） |
 | 生文案（v0.4.0） | 准备文案请求 | 书单（书 ID / 链接）+ 文案要求 → 请求交给 agent：用浏览器工具**只读免费章节**（要你的登录态）当材料，按你给的提示词出投放文案；可用时优先走 `book-material-copy` 技能 |
 | 生视频（v0.4.0） | 准备视频请求 | 只算勾选的**视频**素材：出时间码分镜式视频提示词 |
 | 爆款分析 | 准备分析请求 | 底座是本包自带的 `viral-media-copywriter`（通用爆款素材模型）：清点去重 → 逐素材取证 → 四层抽象 → 每份素材一张《爆款元素卡》+ 汇总创意基因报告 `viral-summary.md` |
@@ -45,11 +46,11 @@
 爆款路径由 **`viral-media-copywriter` 技能**打底（随包注册，见下节）；万一宿主没重启到位、
 技能还没进目录，请求里内嵌了同一套流程，照样能跑。
 切路径会随 `PUT /dvp/state` 的 `pipelineMode` 记住（宿主白名单只认 `prompt`/`viral`）。
-爆款路径下面板自动收起「生图要求」与「来源文本」两块（它们只服务 Grok 出图）。
+爆款路径下面板自动收起「生图要求」与「来源文本」两块（它们只服务生图批次）。
 
 ## 过程目录（拆帧与分析产物的家）
 
-每次派发（含 Grok 出图）先调 `POST /dvp/process`，在产物目录下建
+每次派发（含生图出图）先调 `POST /dvp/process`，在产物目录下建
 `<runsRoot>\process\<年-月-日>_<时分>-<素材名>\`（同分钟再派发自动加 `-2`）：
 
 - `frames\` —— 视频拆帧结果（宿主预建；帧文件名带帧时间码 `t<分>-<秒>.jpg`）
@@ -62,13 +63,20 @@
 
 ## 生图要求（可选项）
 
-三组下拉，默认值就是"什么都不用改也能跑"，值会随 `PUT /dvp/state` 记住：
+四组下拉，默认值就是"什么都不用改也能跑"，值会随 `PUT /dvp/state` 记住：
 
 | 选项 | 默认 | 档位 |
 | --- | --- | --- |
+| 生图引擎（v0.7.0） | `grok` | Grok / ChatGPT（Edge 登录态） |
 | 清晰度 | `1080p` | **720p** / 1080p / 2K / 4K / 8K / 8K电影级+胶片颗粒 |
 | 画幅 | `2:3 竖版` | 2:3 / 3:4 / 9:16 / 1:1 / 16:9 / 3:2 |
 | 每个提示词张数 | `1` | 1 / 2 / 4 |
+
+**引擎是唯一决定"去哪出图、驱动请求打开哪个站点"的开关**（v0.7.0）：选 `ChatGPT（Edge 登录态）` 时，
+驱动请求里的每一步都换成 `browser_open(use:"edge", url:"https://chatgpt.com")` + 贴进 ChatGPT 输入框，
+选 `grok` 时就是 `grok.com`。批次**建的时候绑定引擎，之后改不动**（在 `plan.json` 里），
+换引擎要新建批次；用错家的页面去存图会被 403 拒（见「四道门」里的门①b）。
+识别爆款元素、写提示词这些环节**不绑定引擎**：那一步只是分析，产物给谁用由这里选。
 
 清晰度**从低往高排**，理由是省额度：画质词在提示词里等于"加细节"指令，档位越高越慢越贵。
 所以档位不只是换个词，**提示词里准不准写画质修饰词也跟着变**：
@@ -81,7 +89,8 @@
 | 4K | 可写"4K 超清 + 电影级写实质感" |
 | 8K / 8K+胶片颗粒 | 逐级写满（颗粒、HDR、局部过曝） |
 
-三组都对齐 Grok 图片页上真实存在的参数。风格不放进选项里：每条提示词自己已经写明风格
+清晰度/画幅/张数三组都对齐**目标引擎的图片页**上真实存在的参数（Grok 与 ChatGPT 页面上的按钮同名，
+所以这三组不随引擎变）。风格不放进选项里：每条提示词自己已经写明风格
 （`[电影级真人写实风格]` 那一段），再加一层只会互相打架。
 
 选项会落进 `plan.json` 的 `options` 和 `driver.md` 的「生图要求」行；
@@ -98,7 +107,7 @@
    或点「按路径加」按 `;` / 换行分隔贴多个绝对路径（宿主白名单内，读 `GET /dvp/file`）；
    多个文件会带 `===== 文件名 =====` 分隔标题并进同一个正文框；
 3. 勾上「按来源文本生图」；
-4. 点「用 Grok 生图」——正文会随批次落到 `<mediaRoot>/grok-output/<批次ID>/source-<label>.md`，
+4. 点底部「用 <生图引擎> 生图」——正文会随批次落到 `<mediaRoot>/grok-output/<批次ID>/source-<label>.md`，
    驱动请求里只带**材料引用**（材料 ID + 文件路径 + 字数），正文一个字都不进对话框；
    agent 按路径**按需读取**：先读文件头与目录，按图片数挑最强的 N 个情节，只把那几段读全。
    （正文没落盘时，派发前会自动先落盘拿路径；落盘失败就取消这次派发，不生成一份读不到材料的请求。）
@@ -116,7 +125,7 @@
 可勾选、随派发进请求：
 
 - **准备生图请求** → 文档段落「先读全文再当章纲/来源文本用」，逐项清单里带 `[文档]` 标记；
-- **用 Grok 生图** → 勾选的文档以路径形式附在请求尾部（"参考文档"，不把正文塞进对话框）；
+- **用生图引擎出图** → 勾选的文档以路径形式附在请求尾部（"参考文档"，不把正文塞进对话框）；
 - **准备分析请求** → 文档只当背景资料（认人设与冲突用）。
 
 同一次修复：`GET /dvp/file` 的路径围栏原来只对着 `mediaRoot` 解析，
@@ -151,7 +160,8 @@
 | 输入条右侧常驻 chip（同一面板） | `client.js` → 槽 `conversation.input.right` |
 | 设置页卡片 + `/dvp/preview/` 组件预览页 | `client.js` → 槽 `settings.section` |
 | 媒体目录扫描、图片字节、文本读取、逐项状态、运行目录 | `index.js` → `/dvp/scan`、`/dvp/image`、`/dvp/file`、`/dvp/manifest`、`/dvp/run` |
-| 生图要求（清晰度/画幅/张数）的清洗、落档、进驱动清单 | `index.js` → `sanitizeGrokOptions` + `/dvp/state`、`/dvp/grok/plan` |
+| 生图要求（引擎/清晰度/画幅/张数）的清洗、落档、进驱动清单 | `index.js` → `sanitizeGrokOptions` + `normalizeImageEngine` + `/dvp/state`、`/dvp/grok/plan` |
+| 引擎注册表（站点 / 称呼 / 驱动话术）+ 按 Origin 反查引擎 | `index.js` → `IMAGE_ENGINES`、`engineForOrigin` |
 | 流水线路径（prompt/viral）记住与清洗 | `index.js` → `sanitizePipelineMode` + `/dvp/state` |
 | 面板设置局部保存（只提交哪个字段就只改哪个；`null` = 明确清空） | `index.js` → `/dvp/state` 的 `statePatch` |
 | 运行期根即时生效（保存新目录后，后续写盘就打新目录；响应回带 `effective`） | `index.js` → `resolveRuntime()` + `/dvp/state` |
@@ -160,14 +170,14 @@
 | 来源文本（免费章节/章纲）落盘 | `index.js` → `/dvp/source`、`/dvp/grok/plan` |
 | 注册 6 个技能到全局技能目录 | `index.js` → `ctx.skills.register` |
 | 技能包热重扫（开机后新增的技能免重启注册；设置页有按钮） | `index.js` → `/dvp/skills/reload` |
-| Grok 出图批次落盘 + 图片字节保存 | `index.js` → `/dvp/grok/plan`、`/dvp/grok/save` |
+| Grok / ChatGPT 出图批次落盘 + 图片字节保存 | `index.js` → `/dvp/grok/plan`、`/dvp/grok/save` |
 | 批次解析 / 命名 / 驱动配方 / 落盘 | `tools/grok-shot.mjs` |
 | 把已产出的提示词回填进批次 | `tools/backfill-plan.mjs` |
 | 接住浏览器下载的成图并自动改名写账 | `tools/watch-downloads.mjs` |
 | 从浏览器缓存捞回已显示的成图（兜底通道） | `tools/scan-cache.mjs` |
 | 把包根 `client.js` 同步到预览页那一份 | `tools/sync-servable.mjs` |
-| 离线自检（237 项） | `tools/selfcheck.mjs` |
-| 宿主路由集成测试（187 项，真 HTTP + 临时 fixture） | `tools/probe-host.mjs` |
+| 离线自检（300 项） | `tools/selfcheck.mjs` |
+| 宿主路由集成测试（208 项，真 HTTP + 临时 fixture） | `tools/probe-host.mjs` |
 | 收图守护的空闲退出判据测试（18 项，假钟快进） | `tools/verify-watch-idle.mjs` |
 | 真实媒体目录扫描测试（24 项，只读你的实际目录） | `tools/probe-live.mjs` |
 
@@ -214,13 +224,18 @@ node tools/run-all.mjs --list  # 只看清单：跑哪些、以及哪些被排�
 CI 用 Node 20/22/24 三档矩阵、windows-latest。
 
 干净环境实测（`DSH_HOME` / `APPDATA` / `LOCALAPPDATA` / `USERPROFILE` / `DSH_APP_DIR` 全指空目录，
-独立下载的 node，且先 `npm ci` 复现 CI 的全新检出），三档（Node 20/22/24）结果一致 —— **3/3 套件通过**：
+独立下载的 node，且先 `npm ci` 复现 CI 的全新检出），三档（Node 20/22/24）结果一致 —— **3/3 套件通过**
+（这是 2026-09-11 的记录，当时 `verify-grok-bytes.mjs` 还没进 CI）：
 
 | 套件 | 结果 |
 | --- | --- |
 | `tools/probe-host.mjs` | 187 项通过 |
 | `tools/verify-watch-idle.mjs` | 18 项通过 |
 | `tools/selfcheck.mjs` | 237 项通过 |
+
+v0.7.0 本机 `node tools/run-all.mjs`：**4/4 套件通过** —— `probe-host` 208 项 /
+`verify-watch-idle` 18 项 / `verify-grok-bytes` 224 项 / `selfcheck` 300 项，
+未纳入 CI 的仍只有 `probe-live.mjs`。
 
 > `selfcheck.mjs` 原来因为"用 `createRequire` 从**本机 DSH 安装目录**解析 `react`/`react-dom`"被排除。
 > 现在 `react`/`react-dom` 进 `devDependencies`，`run-all.mjs` 把 `DSH_APP_DIR` 指向**仓库根**，
@@ -263,17 +278,23 @@ node "<DSH 安装目录>/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --prof
 4. 勾选要处理的项（支持整组全选/取消）→ 点主按钮。面板会先建过程目录（`process\年-月-日_时分-素材名\`），
    请求写进输入框（Enter 之前你还能改）；写入失败会自动改为复制到剪贴板。
 5. 按 Enter 发送，agent 逐项产出，过程产物进过程目录、成品进产物目录。
-6. 主线 + 只勾图片时，`用 Grok 生图` 可用：它先建**一个批次目录**
+6. 主线 + 只勾图片时，底部 `用 <生图引擎> 生图` 可用（v0.7.0 按「生图要求」里选的引擎改字面）：
+   它先建**一个批次目录**
    `<mediaRoot>/grok-output/<批次ID>/`（批次 ID = `年-月-日_时分-<素材名>`，同一分钟重复派发自动加 `-2`），
-   `plan.json` + `driver.md` + 来源文本 + 成图 + `ledger.json` 全在这一个目录里；
-   再把驱动请求写进输入框，由会话里的 agent 用浏览器插件驱动你的 Edge 打开 grok.com 出图，
+   `plan.json`（含 `engine`）+ `driver.md` + 来源文本 + 成图 + `ledger.json` 全在这一个目录里；
+   再把驱动请求写进输入框，由会话里的 agent 用浏览器插件驱动**所选引擎的页面**
+   （`grok` ⇒ grok.com；`chatgpt` ⇒ Edge 里的 chatgpt.com）出图，
    每张图经 `/dvp/grok/save` 落盘（raw bytes 直传，带 `batch` 就进那一批，不带就进最新一批），
    宿主只回 `{file,bytes,sha256,width,height,status}` 元信息 —— 图片字节不进会话文本；
    最后用**本批的** `ledger.json` 对账。
    想重试某一批：把它的 `batchId` 回传给 `/dvp/grok/plan`（PUT/POST），写回同一目录，不新建。
    读回也一样：`GET /dvp/grok/plan` 不给参数 = 最新一批，`?batch=<批次ID>` = 指定批次。
 
-## Grok 批次目录（P1 数据覆盖修复）
+## 生图批次目录（P1 数据覆盖修复；目录名 `grok-output` 是历史沿革）
+
+> v0.7.0：批次多了**引擎**这个属性（`grok` / `chatgpt`），但**目录仍共用一个根** ——
+> `grok-output` 这个名字是历史沿革（`SKIP_DIRS`、旧批次读取、`?batch=legacy` 都挂在它上面，
+> 改名只会把旧批次弄丢）。**引擎以该批 `plan.json` 的 `engine` 字段为准**，目录名不表意。
 
 **旧行为（已修）**：`plan.json` / `driver.md` / `source-*.md` / 成图全写在固定的
 `<mediaRoot>/grok-output/` 平面里 —— 新批次盖掉旧批次，同名 slug 的图互相盖，
@@ -285,7 +306,7 @@ node "<DSH 安装目录>/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --prof
 <mediaRoot>/grok-output/
 ├─ index.json                          # 可选加速件：latest + 批次清单；缺失/损坏都能读批次
 ├─ 2026-09-14_1238-门廊按铃/            # 一个批次 = 一个目录
-│  ├─ plan.json  driver.md
+│  ├─ plan.json  driver.md              # plan.json 里记 engine / grokUrl / options / nonce
 │  ├─ source-<label>.md                # 本批的来源文本（几万字不进对话）
 │  ├─ 01-<slug>.jpg  …                 # 本批成图（文件名规则不变）
 │  └─ ledger.json                      # 本批的账，items[].file 都指回本批产物
@@ -296,11 +317,11 @@ node "<DSH 安装目录>/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --prof
 
 | 调用 | 行为 |
 | --- | --- |
-| `POST/PUT /dvp/grok/plan`（不传批次身份） | 新建批次目录，响应回 `batchId` **与 `saveNonce`**（存图那把钥匙，见「Grok 出图的实测硬约束」三道门） |
-| `POST/PUT /dvp/grok/plan` + `batchId`（或 `batch`/`dir`） | 续做/重试这一批，写回同一目录，并**换发**新 `saveNonce`（旧的立刻作废） |
+| `POST/PUT /dvp/grok/plan`（不传批次身份） | 新建批次目录，响应回 `batchId`、`engine` **与 `saveNonce`**（存图那把钥匙，见「生图出图的实测硬约束」四道门）。`engine` 不传 = `grok`；传了不认识的引擎 400 |
+| `POST/PUT /dvp/grok/plan` + `batchId`（或 `batch`/`dir`） | 续做/重试这一批，写回同一目录，并**换发**新 `saveNonce`（旧的立刻作废）；**`engine` 以盘上 `plan.json` 为准，调用方改不动** |
 | `GET /dvp/grok/plan` | 最新一批（`dir`/`plan` 字段名不变，另带 `batchId`/`batches`；`plan` 里**不含** `saveNonce`） |
 | `GET /dvp/grok/plan?batch=<id>` | 指定批次；`?batch=legacy` = 旧版平铺布局 |
-| `POST /dvp/grok/save` + `batch` + `nonce`（raw bytes 请求体） | 图落进那一批；不传 batch 则进最新一批。nonce 缺/错 403、非图片字节 415。响应只有元信息，字节不回吐 |
+| `POST /dvp/grok/save` + `batch` + `nonce`（raw bytes 请求体） | 图落进那一批；不传 batch 则进最新一批。Origin 属于另一家引擎 403「引擎不匹配」、nonce 缺/错 403、非图片字节 415。响应只有元信息，字节不回吐 |
 | 旧布局 `<mediaRoot>/grok-output/plan.json` | 仍读得到（算一个历史批次），但**不再被写入** |
 
 拿不准批次时：`GET /dvp/grok/plan` 看 `batchId` 与 `batches`，拿 `batchId` 去和 `ledger.json` 对齐。
@@ -405,17 +426,19 @@ curl -X POST http://127.0.0.1:<端口>/dvp/grok/run -H 'Content-Type: applicatio
 ## 自检
 
 ```bash
-node tools/selfcheck.mjs        # 243 项：静态契约、纯函数、槽注册、面板渲染、布局分配、技能包、热重扫、本地文件读取、镜像一致性
-node tools/probe-host.mjs       # 190 项：把 apply() 挂到真 node:http 上，打真 /dvp/* 路由（临时 fixture）
-node tools/verify-grok-bytes.mjs # 207 项：字节不进会话 + 三道门 + 统一任务记录（状态/续跑/取消/只读）
-node tools/probe-live.mjs       # 24 项：对真实媒体根目录跑扫描/分流/状态/Grok 产物核对（只读）
+node tools/selfcheck.mjs        # 300 项：静态契约、纯函数、槽注册、面板渲染、布局分配、技能包、热重扫、本地文件读取、镜像一致性、引擎可选
+node tools/probe-host.mjs       # 208 项：把 apply() 挂到真 node:http 上，打真 /dvp/* 路由（临时 fixture）
+node tools/verify-grok-bytes.mjs # 224 项：字节不进会话 + 四道门（含引擎门）+ 统一任务记录（状态/续跑/取消/只读）
+node tools/probe-live.mjs       # 24 项：对真实媒体根目录跑扫描/分流/状态/生图产物核对（只读）
 node tools/sync-servable.mjs    # 改完 client.js 后同步预览页那一份（不跑就地同步会被 3f 断言拦住）
 ```
 
 `probe-host.mjs` 覆盖：路由注册、扫描分流与 `depth` 语义、路径围栏（越界 403、非图片扩展名拒绝）、
-图片字节（PNG 魔数校验）、文本读取、manifest 写读回、运行目录落盘、Grok 批次与图片保存、静态预览页、
+图片字节（PNG 魔数校验）、文本读取、manifest 写读回、运行目录落盘、生图批次与图片保存、静态预览页、
 静态预览的路径穿越防护、`ctx.skills.register` 的真实注册内容（含 frontmatter 块标量解析）。
-`verify-grok-bytes.mjs` 的第 5 节覆盖统一任务记录：一次成功批次的记录与产物齐全、部分缺图 ⇒ `partial` 与失败项清单、
+`verify-grok-bytes.mjs` 的第 2g 节覆盖引擎隔离：批次建时绑引擎、`plan.json` 记 `engine`、
+跨引擎的 Origin 一律 403 且理由写明「引擎不匹配」（反向 sanity：自家 Origin + 自家 nonce 同一请求形态仍是 200）；
+第 5 节覆盖统一任务记录：一次成功批次的记录与产物齐全、部分缺图 ⇒ `partial` 与失败项清单、
 续跑 / 仅重试失败项的输出、取消语义、**只读查询不写盘**（整树 sha256 前后比对）、旧批次向后兼容。
 两套都全绿才输出 `全部通过：N 项检查`。
 
@@ -437,7 +460,7 @@ node tools/sync-servable.mjs    # 改完 client.js 后同步预览页那一份�
    的真实文档留了"恰好 4 条"的回归用例。
 5. **产物目录被当成素材扫回来**（实盘暴露）：`media/grok-output/` 是本插件自己的成图产出，
    扫描时却被算进图片组——实测扫出 8 张图，其中 4 张是上一轮 Grok 成图。
-   面板默认全勾选，点「用 Grok 生图」就会**把 Grok 的产出再喂回 Grok**。
+   面板默认全勾选，点生图按钮就会**把上一批的产出再喂回去出图**。
    已把 `grok-output` 加进 `SKIP_DIRS`，并在 `probe-live.mjs` 留了"图片恰好 4 张、产物不参与扫描"的回归。
 6. **面板比视口高，底部按钮点不到**（2026-09-11 实测）：输入条贴在屏幕中下部时，面板往下展开会
    整块落到视口外（实测面板 y 744→1329、视口只有 805）；顶部那种"面板贴底就向上翻"的判定也救不了——
@@ -520,7 +543,7 @@ node tools/sync-servable.mjs    # 改完 client.js 后同步预览页那一份�
     旧平铺 `grok-output/plan.json` 仍读得到（`?batch=legacy`）且不再被写入。
     `probe-host.mjs` 新增 8c 段 45 条断言覆盖这些路径（批次隔离/重试/最新与指定/旧布局兼容/越界拒绝/索引容错）。
 
-## Grok 出图的实测硬约束（2026-09-11 在真实页面验证）
+## 生图出图的实测硬约束（Grok 通道：2026-09-11 在真实页面验证）
 
 这一节是拿真实账号跑过一次之后写的，不是推测：
 
@@ -536,6 +559,9 @@ node tools/sync-servable.mjs    # 改完 client.js 后同步预览页那一份�
 所以：**取图必须发生在已登录的页面上下文里，且必须等到流式输出收尾**
 （`Stop model response` 消失 / 出现 `Download`·`Make video` 工具条）再去读，
 否则会拿到空壳。`tools/grok-shot.mjs` 的 `grokRecipe()` 已按这个结论写死步骤。
+> 这是 **Grok 通道**的实测记录。v0.7.0 新增的 **ChatGPT(Edge) 通道**走同一条落盘路由与同一批门，
+> 差别只在驱动请求里打开的站点与话术（`browser_open(use:"edge", url:"https://chatgpt.com")`）；
+> ChatGPT 页面上的取图时机与 URL 形态**还没在真实账号上实测过**，第一次跑请盯着看，别当已验证。
 存图时**带上批次 ID**（`POST /dvp/grok/save` 的 `batch` 查询参数，或 JSON 体的 `batchId`），
 并带上该批次的 **nonce**（建批次时响应里的 `saveNonce`），图才会进它所属的那一批目录。
 
@@ -553,16 +579,17 @@ raw 直传下请求体里的 base64 字符数是 **0**，会话只收路径/字�
 其中 base64 1,398,444；新路径元信息 211 字符、其中 base64 **0**）。
 这一条路由必须回 CORS——不放，页面内直传就永远读不回元信息，agent 只能把字节搬回会话里再 POST，
 正是要防的绕行。但**不是** `Access-Control-Allow-Origin: *`：那等于告诉浏览器"任何被访问过的网页
-都能读写这条本机端点"。现在这一条路由有三道门（`index.js` 里集中定义，`tools/verify-grok-bytes.mjs`
+都能读写这条本机端点"。现在这一条路由有**四道门**（`index.js` 里集中定义，`tools/verify-grok-bytes.mjs`
 逐条断言正反两面）：
 
 | 门 | 口径 | 被拒的样子 |
 | --- | --- | --- |
-| ① CORS 白名单回显 | 只回显**请求自己的 Origin**（`https://grok.com`、`https://x.ai` 及其子域；判据是解析后的 hostname，不是字符串后缀——`grok.com.evil.example` 这类伪装域不算），并带 `Vary: Origin` | 白名单外的源**一个 CORS 头都不回** + 403（跨源 JS 连错误信息都读不到，写也写不进去） |
-| ② 批次 nonce | 建批次（`POST/PUT /dvp/grok/plan`）时宿主发一把随机 nonce，回在响应里、写进该批 `plan.json`、随驱动清单与面板派发请求交给会话；存图时用 `?nonce=` 或请求头 `X-DVP-Nonce` 带上，缺/错一律 403 | 403；重发同一批会换新 nonce，旧的那把立刻作废。`GET /dvp/grok/plan` **不回吐** nonce（那是跨源读得到的只读端点） |
+| ① CORS 白名单回显 | 只回显**请求自己的 Origin**（`https://grok.com`、`https://x.ai`、`https://chatgpt.com`，加通配项 `https://*.oaidimgs.net`（ChatGPT 成图的 CDN）；判据是解析后的 hostname，不是字符串后缀——`grok.com.evil.example` 这类伪装域不算；通配项只放真子域，裸 `oaidimgs.net` 不放），并带 `Vary: Origin` | 白名单外的源**一个 CORS 头都不回** + 403（跨源 JS 连错误信息都读不到，写也写不进去） |
+| ①b 引擎归属（v0.7.0） | 批次建时把 `engine` 写进 `plan.json`；存图时按请求 Origin 反查引擎（`engineForOrigin`），**两者必须同家**才放行。不认识来源的页面（无 Origin 的同源调用、或未登记站点）不触发这一条 | 403 `引擎不匹配：批次 … 是 … 的批次，这个页面（…）属于 …；换引擎请新建批次`。**在门②之前判**，所以 nonce 是对的也照样拒，理由不会被"nonce 不对"盖掉 |
+| ② 批次 nonce | 建批次（`POST/PUT /dvp/grok/plan`）时宿主发一把随机 nonce，回在响应里、写进该批 `plan.json`、随驱动清单与面板派发请求交给会话；存图时用 `?nonce=` 或请求头 `X-DVP-Nonce` 带上，缺/错一律 403。台账按 **`引擎 + 批次ID`** 分键：换引擎的页面拿不到另一家的钥匙 | 403；重发同一批会换新 nonce，旧的那把立刻作废。`GET /dvp/grok/plan` **不回吐** nonce（那是跨源读得到的只读端点） |
 | ③ 图片魔术字节 | 按魔数收 PNG/JPEG/GIF/WebP，不看扩展名与 content-type（页面直传常常是 `application/octet-stream`） | 415，并在错误里回带请求体前 16 字节便于现场对账 |
 
-写入位置仍被批次目录围栏挡在 `grok-output/<batchId>/` 里（门①②③之外另有一道）。
+写入位置仍被批次目录围栏挡在 `grok-output/<batchId>/` 里（门①②①b③之外另有一道）。
 运维要给别的来源临时开口：`DVP_GROK_SAVE_ORIGINS="https://a.example"`（只按 origin 精确匹配）；
 本机无浏览器调用方要免 nonce：`DVP_GROK_SAVE_ALLOW_ANON=1`（默认关）。
 两道逃生口都只认环境变量，不会因为某个请求长得像旧版就被自动打开。
@@ -590,4 +617,4 @@ raw 直传下请求体里的 base64 字符数是 **0**，会话只收路径/字�
 首张成图落盘为 `media/grok-output/01-01-门廊按铃.jpg`（259316 字节）并写入 `ledger.json` ——
 这是**旧版平铺布局**的路径；新版一律落 `<mediaRoot>/grok-output/<批次ID>/`，
 旧平铺目录仍读得到（`GET /dvp/grok/plan` 不传参在没有任何批次时返回它，`?batch=legacy` 显式读），
-但不会再往里写新批次。详情见下方「Grok 批次目录（P1 数据覆盖修复）」。
+但不会再往里写新批次。详情见下方「生图批次目录（P1 数据覆盖修复；目录名 `grok-output` 是历史沿革）」。

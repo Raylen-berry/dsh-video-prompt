@@ -16,7 +16,7 @@
 //        POST /dvp/process                   建一次派发的「过程目录」（runsRoot/process/年-月-日_时分-slug），
 //                                            拆帧、爆款元素分析等中间产物都写这里
 //        POST /dvp/source                    把「来源文本」（小说正文/章纲）落盘成文件
-//        POST /dvp/grok/plan                 建 Grok 出图批次（含生图要求与来源文本）
+//        POST /dvp/grok/plan                 建出图批次（含引擎选择、生图要求与来源文本）
 //        POST /dvp/grok/save                 保存抓到的成图字节（首选 raw bytes 直传，
 //                                            兼容 JSON base64/URL；响应只回元信息，字节不进会话）
 //                                            CORS 白名单回显 + 批次 nonce + 图片魔术字节，三道门见下方同名注释
@@ -169,6 +169,27 @@ const GROK_OPTION_VALUES = {
 // viral = 视频/图片→爆款元素（蒸馏 skill 的分析路径）。客户端 PIPELINE_MODES 必须与这里一致。
 const PIPELINE_MODE_VALUES = ['prompt', 'viral']
 
+// ── 生图引擎（v0.7.0）────────────────────────────────────────────────────────
+// 「用什么生图」是 UI 里的一个选择，不是写死在大纲 / skill / 批次通道里的东西：
+// 同一批提示词可以投 Grok，也可以投 Edge 里的 ChatGPT。每个引擎只带三个事实：
+//   url        —— browser_open 打开哪个站点
+//   label      —— 面板与驱动清单里怎么称呼它
+//   saveOrigin —— 页面内 POST /dvp/grok/save 时浏览器会带的 Origin（CORS 白名单用）
+//                 chatgpt 的成图挂在 aigei.com CDN 上，页面 fetch 它属于跨源请求，
+//                 所以白名单收的是**资源域**而不是 chatgpt.com（实测约束见 README）。
+// 加新引擎 = 在这里加一条 + client.js 的下拉候选；档位白名单三处共用，不用各配一份。
+export const IMAGE_ENGINES = Object.freeze({
+  grok: { url: 'https://grok.com/', label: 'Grok', saveOrigin: 'https://grok.com' },
+  chatgpt: { url: 'https://chatgpt.com/', label: 'ChatGPT（Edge 登录态）', saveOrigin: 'https://*.oaidimgs.net' },
+})
+export const IMAGE_ENGINE_DEFAULT = 'grok'
+
+/** 把调用方给的引擎收成合法键；不认识的退默认（Grok），不报错、不静默丢批次。 */
+export function normalizeImageEngine(raw) {
+  const key = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+  return Object.prototype.hasOwnProperty.call(IMAGE_ENGINES, key) ? key : IMAGE_ENGINE_DEFAULT
+}
+
 function sanitizeGrokOptions(raw) {
   if (raw === undefined || raw === null || typeof raw !== 'object') return undefined
   const out = {}
@@ -220,7 +241,7 @@ function slugify(raw, fallback) {
   return cleaned === '' ? fallback : cleaned
 }
 
-// ── Grok 批次的目录身份 ─────────────────────────────────────────────────────
+// ── 出图批次的目录身份（所有引擎共用；grok 是历史沿革名）──────────────────────
 // 批次的"目录名"就是 batchId；它必须是单个路径段（不含分隔符、不是 . / ..），
 // 这样 `path.join(grokRoot, batchId)` 天然越不出 grok-output。
 // LEGACY_BATCH_ID 是旧版平铺布局的别名：读得到，但不许再往里写新批次。
@@ -250,7 +271,7 @@ function resolveUniqueGrokBatch(root, slug) {
   return { batchId, dir: path.join(root, batchId) }
 }
 
-// ── Grok 请求体里的"批次身份" ────────────────────────────────────────────────
+// ── 出图请求体里的"批次身份"（所有引擎共用）───────────────────────────────────
 // batchId / batch / dir 三个键都收（dir 是旧调用方的口径，取末段目录名）。
 // 四种结论分得很开，宁可口径严一点也不许猜：
 //   ''      + ok  → 调用方没指定批次 ⇒ 新建
@@ -328,16 +349,17 @@ async function touchGrokIndex(root, batchId) {
 /**
  * 允许读取 /dvp/grok/save 响应的源。集中定义在这里，断言直接读它（tools/verify-grok-bytes.mjs）。
  *
- * 为什么是这两个域：取图必须发生在**已登录 grok.com 的页面上下文**里（签名 URL 绑定会话，
- * 见 README「Grok 出图的实测硬约束」），所以实际会 POST 回来的只有 Grok 自己与它的 x.ai 同族域。
- * 通配子域（*.grok.com / *.x.ai）而不是逐个白名单，是因为 assets.grok.com / grok.com 之间
- * 跳转时页面 origin 会变，逐个列会漏 —— 而这两个域都是同一家、同一份登录态。
+ * 为什么是这些域：取图必须发生在**已登录出图站点的页面上下文**里（签名 URL 绑定会话，
+ * 见 README「Grok 出图的实测硬约束」），所以实际会 POST 回来的只有批次所选引擎自己的域。
+ * grok.com / x.ai 是同族两域跳转；chatgpt.com 的成图资源在 oaidimgs.net CDN（通配子域）。
+ * 通配子域（*.grok.com / *.x.ai / *.oaidimgs.net）而不是逐个白名单，是因为 assets.grok.com / grok.com
+ * 之间跳转时页面 origin 会变，逐个列会漏 —— 而同一家的域都是同一份登录态。
  *
  * 刻意**不**收 127.0.0.1 / localhost：面板与宿主是同源（同源请求不需要 CORS），
  * 收了反而等于把口子还给"本机上任何别的 HTTP 服务"。
  * 运维需要临时加源：DVP_GROK_SAVE_ORIGINS="https://a.example,https://b.example"（只按 origin 精确匹配）。
  */
-export const GROK_SAVE_ALLOWED_ORIGINS = Object.freeze(['https://grok.com', 'https://x.ai'])
+export const GROK_SAVE_ALLOWED_ORIGINS = Object.freeze(['https://grok.com', 'https://x.ai', 'https://chatgpt.com', 'https://*.oaidimgs.net'])
 
 const GROK_SAVE_ALLOWED_HEADERS = 'Content-Type, X-DVP-Nonce'
 
@@ -390,11 +412,16 @@ export function isAllowedGrokSaveOrigin(origin, env) {
     // 解不出 URL（`null` / 畸形值）：只认环境变量里显式写下的精确串。
     return extra.includes(raw.toLowerCase())
   }
-  // 只认 https（白名单里两个域都是 https）：`http://grok.com` 这种协议降级不认。
+  // 只认 https（白名单里的域都是 https）：`http://grok.com` 这种协议降级不认。
   if (parsed.protocol !== 'https:') return false
   if (GROK_SAVE_ALLOWED_ORIGINS.some((allowed) => {
     const base = parseOrigin(allowed)
     if (base === null) return false
+    // `https://*.example.net` 写法（base.hostname 以 `*.` 开头）= 通配子域：
+    // 只认它下面的真子域，裸 apex 域（oaidimgs.net）不算 —— 与 grok/x.ai 的既有口径一致。
+    if (base.hostname.startsWith('*.')) {
+      return parsed.hostname.endsWith('.' + base.hostname.slice(2)) && parsed.hostname !== base.hostname.slice(2)
+    }
     return parsed.hostname === base.hostname || parsed.hostname.endsWith('.' + base.hostname)
   })) return true
   return extra.includes(raw.toLowerCase())
@@ -424,6 +451,24 @@ function grokSaveDenyJson(res, status, message) {
   sendJson(res, status, { ok: false, error: message })
 }
 
+/**
+ * 这个 Origin 属于哪个引擎（'grok' | 'chatgpt'）；认不出（同源/非浏览器调用方）返回 ''。
+ * 判据与 isAllowedGrokSaveOrigin 同一套 hostname 解析，只是方向反过来：从域回到引擎。
+ * grok.com / x.ai ⇒ grok；chatgpt.com 及其子域、oaidimgs.net 真子域（成图 CDN）⇒ chatgpt。
+ */
+export function engineForOrigin(origin) {
+  const raw = origin === undefined || origin === null ? '' : String(origin).trim()
+  if (raw === '') return ''
+  const parsed = parseOrigin(raw)
+  if (parsed === null || parsed.protocol !== 'https:') return ''
+  const host = parsed.hostname
+  if (host === 'grok.com' || host.endsWith('.grok.com') || host === 'x.ai' || host.endsWith('.x.ai')) return 'grok'
+  if (host === 'chatgpt.com' || host.endsWith('.chatgpt.com')) return 'chatgpt'
+  // 通配项只认真子域、不认裸 apex —— 与白名单判别器同口径
+  if (host.endsWith('.oaidimgs.net')) return 'chatgpt'
+  return ''
+}
+
 // 一次性 nonce 的台账。作用域是**进程内**，键是 batchId：
 //   * 生成：POST/PUT /dvp/grok/plan 建批次（或续做）时新生成一个，回在响应里、写进 plan.json，
 //     宿主把它一起交给会话（driver.md / 面板派发请求），会话里的 agent 在执行取图那一步把它带上。
@@ -433,10 +478,19 @@ const GROK_SAVE_NONCE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const GROK_SAVE_NONCE_MAX = 500
 const grokSaveNonces = new Map()
 
+/**
+ * nonce 台账的键。批次目录名跨引擎仍然唯一（时间戳+slug），但**不同引擎的同一批**
+ * 各自有各自的钥匙 —— 键里带上引擎，Grok 那把永远开不了 ChatGPT 批次（反之亦然）。
+ * 老批次（v0.7.0 之前建的）plan.json 里没有 engine ⇒ 按默认引擎 Grok 记账，行为不变。
+ */
+function nonceKey(engine, batchId) {
+  return normalizeImageEngine(engine) + '\u0000' + batchId
+}
+
 /** 给一个批次发新 nonce（32 字节随机 → 64 位十六进制）。批次重发 ⇒ 旧 nonce 立刻作废。 */
-function issueGrokBatchNonce(batchId) {
+function issueGrokBatchNonce(engine, batchId) {
   const nonce = randomBytes(32).toString('hex')
-  grokSaveNonces.set(batchId, { nonce, at: Date.now() })
+  grokSaveNonces.set(nonceKey(engine, batchId), { nonce, at: Date.now() })
   const now = Date.now()
   for (const [key, item] of grokSaveNonces) {
     if (now - item.at > GROK_SAVE_NONCE_TTL_MS) grokSaveNonces.delete(key)
@@ -473,8 +527,8 @@ export function grokSaveNonceRequired(env) {
  * 这个批次该用的 nonce：内存台账优先（进程内最新发出的那次），内存没有（宿主重启过）就读
  * 该批次目录 plan.json 里记着的那一个。两处都没有 ⇒ 空串 ⇒ 一律 403（宁可拒，也不放行）。
  */
-async function expectedGrokSaveNonce(batchId, readPlanNonce) {
-  const known = grokSaveNonces.get(batchId)
+async function expectedGrokSaveNonce(engine, batchId, readPlanNonce) {
+  const known = grokSaveNonces.get(nonceKey(engine, batchId))
   if (known !== undefined && typeof known.nonce === 'string' && known.nonce !== '') return known.nonce
   return await readPlanNonce()
 }
@@ -496,13 +550,14 @@ export function imageFileSignature(bytes) {
   return ''
 }
 
-// ── Grok 驱动清单（写给人看，也写给会话里的 agent 看）────────────────────────
+// ── 出图驱动清单（写给人看，也写给会话里的 agent 看；引擎由 plan.engine 决定）──
 
 // 导出只为离线断言：tools/verify-grok-bytes.mjs 要直接验"这份清单里没有 base64 搬运通道"，
 // 不必起 HTTP 服务。纯函数（只读 plan 对象 + path.join），无副作用。
 export function driverDoc(plan) {
   const lines = []
-  lines.push('# Grok 出图驱动清单')
+  const engine = IMAGE_ENGINES[normalizeImageEngine(plan.engine)] || IMAGE_ENGINES[IMAGE_ENGINE_DEFAULT]
+  lines.push('# ' + engine.label + ' 出图驱动清单')
   lines.push('')
   lines.push('- 生成时间：' + plan.createdAt)
   if (plan.batchId) lines.push('- 批次 ID：' + plan.batchId + '（重试这一批时把它回传给 /dvp/grok/plan，写回同一目录）')
@@ -510,7 +565,7 @@ export function driverDoc(plan) {
     lines.push('- 存图 nonce：`' + plan.saveNonce + '` —— 往 /dvp/grok/save 存图时必须带上它（`?nonce=` 或请求头 `X-DVP-Nonce`），')
     lines.push('  否则 403。非白名单来源（grok.com / x.ai 之外）的页面同样被拒：这一步挡的是"任意网页往本机端点写图"。')
   }
-  lines.push('- 目标站点：' + plan.grokUrl)
+  lines.push('- 目标站点：' + (plan.grokUrl || engine.url) + '（引擎：' + engine.label + '）')
   lines.push('- 批次条数：' + plan.count)
   lines.push('- 图片落地：' + plan.dir)
   lines.push('- 批次文件：' + path.join(plan.dir, 'plan.json'))
@@ -523,7 +578,7 @@ export function driverDoc(plan) {
     }
     if (parts.length > 0) lines.push('- 生图要求：' + parts.join(' · '))
     if (typeof plan.options.aspect === 'string' && plan.options.aspect !== '') {
-      lines.push('  （画幅要真的在 Grok 页面上切到对应比例按钮；清晰度/质感写进提示词正文里。）')
+      lines.push('  （画幅要真的在 ' + engine.label + ' 页面上切到对应比例按钮；清晰度/质感写进提示词正文里。）')
     }
   }
   if (plan.sourceFile) lines.push('- 来源文本：' + plan.sourceFile)
@@ -532,9 +587,9 @@ export function driverDoc(plan) {
   lines.push('')
   lines.push('由会话里的 agent 用浏览器插件驱动用户的 Edge：')
   lines.push('')
-  lines.push('1. `browser_open(use:"edge", url:"' + plan.grokUrl + '")` —— 走用户登录态。')
+  lines.push('1. `browser_open(use:"edge", url:"' + (plan.grokUrl || engine.url) + '")` —— 走用户登录态。')
   lines.push('2. 未登录 / 出现人机验证 / 额度用尽时**停下来叫人**，不允许绕过。')
-  lines.push('3. 逐条把下面提示词贴进 Grok 输入框并发送，等新图出现。')
+  lines.push('3. 逐条把下面提示词贴进 ' + engine.label + ' 输入框并发送，等新图出现。')
   if (typeof plan.options === 'object' && plan.options !== null && typeof plan.options.aspect === 'string') {
     lines.push('   发送前先把输入框下方的画幅比例切到 ' + plan.options.aspect + '，逐条对齐。')
   }
@@ -1229,7 +1284,7 @@ export function listFilesSync(dir) {
  */
 export function runsToAgentText(runs, ctx = {}) {
   const list = sortRuns(runs)
-  const kindLabel = (k) => (k === 'viral' ? '爆款分析' : k === 'copy' ? '生文案' : k === 'grok' ? 'Grok 出图' : '生图')
+  const kindLabel = (k) => (k === 'viral' ? '爆款分析' : k === 'copy' ? '生文案' : k === 'grok' ? '出图批次' : '生图')
   const lines = []
   lines.push('# 派发历史（最新在上，共 ' + list.length + ' 条）')
   if (ctx.mediaDir) lines.push('- 媒体目录：' + ctx.mediaDir)
@@ -1730,7 +1785,9 @@ export async function apply(ctx, rawConfig = {}) {
         if (req.method === 'PUT' || req.method === 'POST') {
           const patch = JSON.parse(await readBody(req))
           const grokOptions = sanitizeGrokOptions(patch.grokOptions)
-          const pipelineMode = sanitizePipelineMode(patch.pipelineMode)
+          // 面板上的"生图引擎"下拉：值必须落在 IMAGE_ENGINES 里，非法值退默认（Grok）。
+    const imageEngine = normalizeImageEngine(patch.imageEngine)
+    const pipelineMode = sanitizePipelineMode(patch.pipelineMode)
           // 只提交了哪个字段就只改哪个：没提交（undefined）保留现值，null 才是明确清空。
           // 早先写成 `typeof patch.mediaRoot === 'string' ? … : undefined`，于是面板只提交
           // `{ pipelineMode }` 时两个根被 undefined 覆盖 —— state.json 里的媒体/产物目录直接消失。
@@ -1738,6 +1795,8 @@ export async function apply(ctx, rawConfig = {}) {
           if ('mediaRoot' in patch) statePatch.mediaRoot = patch.mediaRoot === null || patch.mediaRoot === '' ? null : resolveRoot(patch.mediaRoot, path.join(stateDir(), 'media'))
           if ('runsRoot' in patch) statePatch.runsRoot = patch.runsRoot === null || patch.runsRoot === '' ? null : resolveRoot(patch.runsRoot, path.join(stateDir(), 'runs'))
           if (grokOptions !== undefined) statePatch.grokOptions = grokOptions
+          // 只在调用方**提交了** imageEngine 时才写；没提交保留现值（与目录字段同一口径）。
+          if ('imageEngine' in patch) statePatch.imageEngine = imageEngine
           if (pipelineMode !== undefined) statePatch.pipelineMode = pipelineMode
           const next = await writeState(statePatch)
           // 保存成功就同步刷新运行期配置：后面写盘的每个路由都打新目录
@@ -1952,7 +2011,11 @@ export async function apply(ctx, rawConfig = {}) {
     },
   }))
 
-  // ---- ⑨ Grok 出图：批次落盘 / 读回 / 图片字节保存 ----
+  // ---- ⑨ 出图批次：引擎可选（Grok / ChatGPT），落盘 / 读回 / 图片字节保存 ----
+  // 批次统一落在 <mediaRoot>/grok-output/<批次ID>/。目录名里的 grok 是历史沿革
+  // （v0.6.x 只有 Grok 一条通道）；v0.7.0 起它是**所有生图引擎共用**的批次根，
+  // 每批用什么引擎记在 plan.json 的 engine 字段里 —— 改目录名会让旧批次与
+  // SKIP_DIRS 防回扫、README 实测记录全部断链，所以留着不改名，只改语义。
   // 浏览器驱动那一步由会话里的浏览器插件做（它持用户的 Edge 登录态）；
   // 宿主这边只负责把提示词批次记下来、把抓到的图落到工作区。
   //
@@ -2043,6 +2106,35 @@ export async function apply(ctx, rawConfig = {}) {
     }
     let batchId = wanted.id === BATCH_ROOT ? '' : wanted.id
     let dir = ''
+    // ── 引擎在建批次时定下来：新批次认请求里的 engine；续做/重试**只认盘上 plan.json 里那一份**
+    // （调用方不必再传，也改不动 —— 换引擎就该是新批次）。plan 丢了退默认（Grok），与老批次同口径。
+    // 校验放在 mkdir 之前：被拒的请求不在盘上留孤儿目录。
+    let engine = IMAGE_ENGINE_DEFAULT
+    let engineExplicit = false
+    if (batchId !== '') {
+      try {
+        const existingPlan = JSON.parse(await fsp.readFile(path.join(root, batchId, 'plan.json'), 'utf8'))
+        if (existingPlan !== null && typeof existingPlan === 'object' && typeof existingPlan.engine === 'string') {
+          engine = normalizeImageEngine(existingPlan.engine)
+        }
+      } catch { /* 读不到就按默认 */ }
+    } else {
+      // 显式提交过 engine 的调用方：非法值直接拒（400），不静默改名 ——
+      // "以为建的是 ChatGPT 批、实际是 Grok 批"比一次失败更糟。没提交才退默认。
+      engineExplicit = typeof body.engine === 'string' && body.engine.trim() !== ''
+      if (engineExplicit && !Object.prototype.hasOwnProperty.call(IMAGE_ENGINES, body.engine.trim().toLowerCase())) {
+        sendJson(res, 400, { ok: false, error: 'engine 不认识：' + body.engine.slice(0, 40) + '（只认 ' + Object.keys(IMAGE_ENGINES).join(' / ') + '）' })
+        return undefined
+      }
+      engine = normalizeImageEngine(body.engine)
+      // 面板提交的 grokUrl 必须与所选引擎一致（同样只在**新建批次**时校验）：
+      // 防的是"引擎选了 ChatGPT、URL 还停在 grok.com"这种半更新状态 —— 派发出去就是白跑一轮。
+      const submittedUrl = typeof body.grokUrl === 'string' ? body.grokUrl.trim() : ''
+      if (engineExplicit && submittedUrl !== '' && !submittedUrl.startsWith(IMAGE_ENGINES[engine].url.replace(/\/$/, ''))) {
+        sendJson(res, 400, { ok: false, error: 'grokUrl 与引擎不匹配：' + IMAGE_ENGINES[engine].label + ' 应打开 ' + IMAGE_ENGINES[engine].url + '，收到的是 ' + submittedUrl.slice(0, 120) })
+        return undefined
+      }
+    }
     if (batchId !== '') {
       // 续做/重试：写回调用方指定的那一批，不新建、不改名。
       dir = path.join(root, batchId)
@@ -2075,12 +2167,13 @@ export async function apply(ctx, rawConfig = {}) {
     const options = sanitizeGrokOptions(body.options)
     // 每批一个新 nonce：写进 plan.json（宿主重启后仍能校验）、回给调用方、进 driver.md 与面板派发请求。
     // 重发同一批次（PUT/POST 带 batchId）会换新 nonce ⇒ 旧的那把立刻作废。
-    const saveNonce = issueGrokBatchNonce(batchId)
+    const saveNonce = issueGrokBatchNonce(engine, batchId)
     const plan = {
       createdAt: new Date().toISOString(),
       batchId,
+      engine,
       saveNonce,
-      grokUrl: typeof body.grokUrl === 'string' && body.grokUrl !== '' ? body.grokUrl : 'https://grok.com/',
+      grokUrl: typeof body.grokUrl === 'string' && body.grokUrl !== '' ? body.grokUrl : IMAGE_ENGINES[engine].url,
       dir,
       count: entries.length,
       ...(typeof body.processDir === 'string' && body.processDir !== '' ? { processDir: body.processDir.slice(0, 300) } : {}),
@@ -2122,6 +2215,7 @@ export async function apply(ctx, rawConfig = {}) {
       ok: true,
       ...grokBatchInfo(root, batchId, dir),
       count: plan.count,
+      engine,
       // nonce 交给调用方（面板 → 派发请求 → 会话里的 agent → 页面内 POST 时带上）。
       // 它只在这条批次通道里有效，不是账号凭据；但除本响应与批次 plan.json 外不再另发一份。
       saveNonce,
@@ -2320,6 +2414,30 @@ export async function apply(ctx, rawConfig = {}) {
           deny(403, '批次目录越界', cors)
           return
         }
+        // ── 门①b：引擎归属。批次建的时候选了哪个引擎，就只有那个引擎的页面能往里存图 ——
+        // grok.com 的页面拿不到 chatgpt 批次的 nonce（GET 不回吐、台账分键），反之亦然；
+        // 这道检查把"碰巧猜中钥匙"也堵掉，并让报错说清是哪一批不匹配。
+        // Origin 解得出但认不出引擎（陌生域）⇒ 拒；不带 Origin（同源面板 / 无头工具）⇒ 不拦，
+        // 那类调用方本来就不受 CORS 约束，边界由 nonce 与批次目录围栏守着。
+        let batchEngineForGate = IMAGE_ENGINE_DEFAULT
+        try {
+          const planForGate = JSON.parse(await fsp.readFile(path.join(dir, 'plan.json'), 'utf8'))
+          if (planForGate !== null && typeof planForGate === 'object' && typeof planForGate.engine === 'string') {
+            batchEngineForGate = normalizeImageEngine(planForGate.engine)
+          }
+        } catch { /* 没有 plan.json（刚现建的孤儿批）⇒ 不拦 */ }
+        const originHeader = String(req.headers.origin === undefined || req.headers.origin === null ? '' : req.headers.origin).trim()
+        const originEngine = engineForOrigin(originHeader)
+        if (originHeader !== '' && originEngine === '') {
+          deny(403, '来源不属于任何已登记的生图引擎：' + originHeader.slice(0, 120), cors)
+          return
+        }
+        if (originEngine !== '' && originEngine !== batchEngineForGate) {
+          deny(403, '引擎不匹配：批次 ' + batchId + ' 是 ' + IMAGE_ENGINES[batchEngineForGate].label
+            + ' 的批次，这个页面（' + originHeader.slice(0, 80) + '）属于 '
+            + IMAGE_ENGINES[originEngine].label + '；换引擎请新建批次', cors)
+          return
+        }
         // ── 门②：batch nonce。缺/错一律 403，且**在 mkdir 之前**判 —— 被拒的请求不在盘上留痕迹。
         if (grokSaveNonceRequired()) {
           const provided = String(
@@ -2328,7 +2446,8 @@ export async function apply(ctx, rawConfig = {}) {
             || req.headers[GROK_SAVE_NONCE_HEADER]
             || '',
           ).trim()
-          const expected = await expectedGrokSaveNonce(batchId, async () => {
+          // 引擎只认批次目录 plan.json 里那一份（建批次时定死）；save 的调用方不传 engine。
+          const expected = await expectedGrokSaveNonce(batchEngineForGate, batchId, async () => {
             try {
               const parsed = JSON.parse(await fsp.readFile(path.join(root, batchId, 'plan.json'), 'utf8'))
               return parsed && typeof parsed.saveNonce === 'string' ? parsed.saveNonce : ''

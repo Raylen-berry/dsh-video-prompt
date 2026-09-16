@@ -229,11 +229,11 @@ const saveRoute = routes.find((r) => r.path === '/dvp/grok/save')
 ok('/dvp/grok/save 路由已注册', saveRoute !== undefined, routes.map((r) => r.path))
 ok('index.js 导出 imageSize（会话侧与宿主侧同一口径）', typeof host.imageSize === 'function')
 
-async function createBatch(slug) {
+async function createBatch(slug, engine) {
   const started = await fetch(BASE + '/dvp/grok/plan', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    body: JSON.stringify({ grokUrl: 'https://grok.com/', slug, entries: [{ title: '门廊按铃', prompt: '雨夜门廊，暖光，竖版' }] }),
+    body: JSON.stringify({ slug, ...(engine ? { engine } : {}), entries: [{ title: '门廊按铃', prompt: '雨夜门廊，暖光，竖版' }] }),
   })
   return { status: started.status, body: await started.json() }
 }
@@ -241,6 +241,17 @@ async function createBatch(slug) {
 const batch = await createBatch('verify-grok-bytes')
 ok('批次建立成功（405/404 说明路由没挂上）', batch.status === 200 && batch.body.ok === true, batch)
 const batchId = batch.body.batchId
+// v0.7.0：不传引擎的调用方默认落 grok（老行为），响应里如实报出。
+ok('不传 engine 的批次默认 grok（老调用方行为不变）', batch.body.engine === 'grok', batch.body.engine)
+// 显式提交但认不出来的引擎：拒，不静默改名
+const badEngine = await createBatch('verify-engine-bad', 'nano-banana')
+ok('engine 不认识时直接 400（不静默退成 grok）', badEngine.status === 400 && String(badEngine.body.error || '').includes('engine'), badEngine)
+// 引擎与站点不一致也拒（面板半更新状态的防呆）
+const urlMismatch = await fetch(BASE + '/dvp/grok/plan', {
+  method: 'POST', headers: { 'Content-Type': 'application/json; charset=utf-8' },
+  body: JSON.stringify({ slug: 'verify-engine-urlmismatch', engine: 'chatgpt', grokUrl: 'https://grok.com/', entries: [{ title: 'x', prompt: 'y' }] }),
+}).then((r) => ({ status: r.status, body: null }))
+ok('engine=chatgpt 但 grokUrl 是 grok.com ⇒ 400（不建半套批次）', urlMismatch.status === 400, urlMismatch.status)
 // 门②：建批次时宿主发下来的 nonce（存图必须带上它）。本节后面的正常路径全用它。
 const SAVE_NONCE = typeof batch.body.saveNonce === 'string' ? batch.body.saveNonce : ''
 ok('批次响应带 saveNonce（存图那把钥匙，长度 ≥ 32）', SAVE_NONCE.length >= 32, SAVE_NONCE.length)
@@ -480,6 +491,51 @@ ok('⑥ 新 nonce 可用（200）', (await postRawOrigin(BIG, withNonce('batch='
 ok('⑥ 只读端点 GET /dvp/grok/plan 不回吐 nonce（跨源读得到的端点不许带钥匙）',
   (await (await fetch(BASE + '/dvp/grok/plan?batch=' + encodeURIComponent(batchId))).text()).includes(newNonce) === false)
 
+// ── 2g. 引擎隔离（v0.7.0：批次记引擎，Origin 判别 + 台账分键双保险）──────────
+console.log('\n2g) 引擎隔离 · ChatGPT(Edge) 通道')
+const CHATGPT_ORIGIN = 'https://chatgpt.com'
+const chatBatch = await createBatch('verify-engine-chatgpt', 'chatgpt')
+ok('建 chatgpt 批次成功且响应报 engine=chatgpt', chatBatch.status === 200 && chatBatch.body.ok === true && chatBatch.body.engine === 'chatgpt', chatBatch.body && { ok: chatBatch.body.ok, engine: chatBatch.body.engine })
+const chatBatchId = chatBatch.body.batchId
+const CHAT_NONCE = typeof chatBatch.body.saveNonce === 'string' ? chatBatch.body.saveNonce : ''
+const chatPlanOnDisk = JSON.parse(await fsp.readFile(path.join(MEDIA, 'grok-output', chatBatchId, 'plan.json'), 'utf8'))
+ok('plan.json 记下 engine=chatgpt（重试时以它为准）', chatPlanOnDisk.engine === 'chatgpt', chatPlanOnDisk.engine)
+ok('不传 grokUrl 时 plan.grokUrl 落到该引擎的站点', /^https:\/\/chatgpt\.com/.test(String(chatPlanOnDisk.grokUrl)), chatPlanOnDisk.grokUrl)
+const chatChatDriver = await (await fetch(BASE + '/dvp/grok/plan?batch=' + encodeURIComponent(chatBatchId))).json()
+ok('driver.md 指向 chatgpt.com 并称呼 ChatGPT', chatChatDriver.plan !== null && String(chatChatDriver.plan.grokUrl).includes('chatgpt.com')
+  && (await fsp.readFile(path.join(MEDIA, 'grok-output', chatBatchId, 'driver.md'), 'utf8')).includes('ChatGPT'))
+// 正常路径：chatgpt 批 + chatgpt Origin + 本批 nonce ⇒ 200
+const chatOkRes = await postRaw(BIG, withNonce('batch=' + encodeURIComponent(chatBatchId) + '&index=1&slug=chat-ok', CHAT_NONCE), 'image/png', { Origin: CHATGPT_ORIGIN })
+ok('chatgpt 批次收 chatgpt.com 页面的直传（200）', chatOkRes.status === 200, chatOkRes.status)
+// 三道交叉。**必须走 postRawOrigin**：postRaw 的第 3 个参数是 contentType，
+// 把 Origin 传进去等于不带 Origin 发请求（同源调用会被门①b 放行），断言就假绿了。
+// x1：chatgpt 页面 + grok 批 + 无 nonce ⇒ Origin 那家就先撞门①b
+const x1 = await postRawOrigin(BIG, 'batch=' + encodeURIComponent(batchId) + '&index=41&slug=grok-batch-from-chatgpt', CHATGPT_ORIGIN)
+ok('引擎门：chatgpt 页面存不进 grok 批次（403 且写明不匹配）',
+  x1.status === 403 && x1.text.includes('引擎不匹配'), { status: x1.status, body: x1.text.slice(0, 120) })
+// x2：grok 页面 + chatgpt 批 + grok 批的 nonce ⇒ 台账按引擎分键 + 门①b 双拒
+const x2 = await postRawOrigin(BIG, withNonce('batch=' + encodeURIComponent(chatBatchId) + '&index=42&slug=chat-batch-from-grok', SAVE_NONCE), GROK_ORIGIN)
+ok('引擎门：拿 grok 的 nonce 也开不了 chatgpt 批（403 且写明不匹配）',
+  x2.status === 403 && x2.text.includes('引擎不匹配'), { status: x2.status, body: x2.text.slice(0, 120) })
+// x3：nonce **对**（chatgpt 批自己的）、Origin 错家 ⇒ 撞的必须是门①b，
+// 理由才该是"引擎不匹配"（而不是门②的"nonce 不正确"）。
+const x3 = await postRawOrigin(BIG, withNonce('batch=' + encodeURIComponent(chatBatchId) + '&index=43&slug=chat-batch-origin-mismatch', CHAT_NONCE), GROK_ORIGIN)
+ok('引擎门：即便拿到对的 nonce，Origin 属于另一家也拒（403 且写明不匹配）',
+  x3.status === 403 && x3.text.includes('引擎不匹配'), { status: x3.status, body: x3.text.slice(0, 120) })
+ok('被引擎门拒的请求没在盘上留下文件', !existsSync(path.join(MEDIA, 'grok-output', chatBatchId, '43-chat-batch-origin-mismatch.png')))
+ok('门①b 先于门②生效：nonce 是对的时候拒因仍是"引擎不匹配"（不是 nonce 不对）',
+  x3.status === 403 && !x3.text.includes('nonce 不正确'), x3.text.slice(0, 160))
+// 反向 sanity：同一批 + 同一 nonce + 自家 Origin ⇒ 200，证明上面三条不是"这请求本来就必 403"
+const x4 = await postRawOrigin(BIG, withNonce('batch=' + encodeURIComponent(chatBatchId) + '&index=44&slug=chat-own-origin-ok', CHAT_NONCE), CHATGPT_ORIGIN)
+ok('反向 sanity：自家 Origin + 自家 nonce 同请求形态 ⇒ 200（门不是一律拒）', x4.status === 200, { status: x4.status, body: x4.text.slice(0, 120) })
+// 重试不改引擎：对 chatgpt 批重发 plan（不带 engine 字段），盘上的 engine 仍是 chatgpt
+const chatRetry = await fetch(BASE + '/dvp/grok/plan', {
+  method: 'PUT', headers: { 'Content-Type': 'application/json; charset=utf-8' },
+  body: JSON.stringify({ batchId: chatBatchId, slug: 'verify-engine-chatgpt', entries: [{ title: '门廊按铃', prompt: '雨夜门廊，暖光，竖版' }] }),
+}).then((r) => r.json())
+ok('续做批次：响应仍报 engine=chatgpt（调用方改不动引擎）', chatRetry.ok === true && chatRetry.engine === 'chatgpt', chatRetry.engine)
+// driverDoc 离线口径在 3) 节（entries 定义之后）断言，这里只验 HTTP 侧。
+
 
 console.log('\n3) 会话文本（配方/驱动清单/面板提示）里没有 base64 搬运通道')
 // 注意 grok-shot 的 MIN_PROMPT_CHARS = 40：两条样例正文都必须**超过 40 字**，
@@ -529,6 +585,10 @@ if (typeof driverDoc === 'string' && driverDoc !== '') {
   ok('driverDoc 把本批 nonce 交给会话（存图时带上，否则 403）', driverDoc.includes('&nonce=' + SAVE_NONCE))
   ok('driverDoc 写明图片内容/base64 不进会话文本', /一律不进会话文本/.test(driverDoc))
   ok('driverDoc 不含旧版"base64 或图片 URL + index/slug"措辞', !/base64 或图片 URL/.test(driverDoc))
+// v0.7.0：engine 跟着清单走 —— chatgpt 批次的标题与站点都变，不带 engine 的老 plan 仍是 Grok。
+const chatDriverDoc = host.driverDoc({ dir: batchDirForRecipe, batchId, saveNonce: CHAT_NONCE, entries, engine: 'chatgpt', createdAt: '2026-09-16T00:00:00.000Z', count: entries.length, options: { clarity: '1080p', aspect: '3:4' } })
+ok('driverDoc(engine:chatgpt) 是 ChatGPT 清单并打开 chatgpt.com', chatDriverDoc.includes('# ChatGPT（Edge 登录态） 出图驱动清单') && chatDriverDoc.includes('url:"https://chatgpt.com/"'), chatDriverDoc.slice(0, 120))
+ok('driverDoc 不带 engine 的老 plan 仍生成 Grok 清单（向后兼容）', driverDoc.includes('# Grok 出图驱动清单'))
 }
 
 const planDoc = (await import(pathToFileURL(path.join(PKG, 'tools', 'backfill-plan.mjs')).href)).renderDriverDoc({

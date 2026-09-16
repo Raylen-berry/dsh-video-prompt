@@ -247,6 +247,35 @@ const clarityChoices = (defs.find((d) => d.key === 'clarity') || {}).choices.map
 ok('清晰度从低到高排（720p 在最前）', JSON.stringify(clarityChoices) === JSON.stringify(['720p', '1080p', '2K', '4K', '8K', '8K电影级+胶片颗粒']), clarityChoices)
 ok('清晰度默认是 1080p', (defs.find((d) => d.key === 'clarity') || {}).value === '1080p')
 
+// ── 3c2. 生图引擎（v0.7.0：用什么生图写在 UI 里，不写死 Grok）────────────────
+section('3c2) 生图引擎可选（Grok / ChatGPT·Edge）')
+
+const engines = exportsObj.internals.IMAGE_ENGINES
+ok('引擎候选有 grok 与 chatgpt 两条', Array.isArray(engines) && engines.length === 2
+  && engines.map((e) => e.value).join(',') === 'grok,chatgpt', engines && engines.map((e) => e.value))
+ok('每条引擎都有 label/url/hint，url 是 https', engines.every((e) => e.label && /^https:\/\//.test(e.url) && e.hint && e.hint.length > 8))
+ok('默认引擎是 Grok（老行为不变）', exportsObj.internals.engineDef(undefined).value === 'grok'
+  && exportsObj.internals.engineDef('').value === 'grok')
+ok('engineDef 认得 chatgpt 并给出站点', exportsObj.internals.engineDef('chatgpt').url === 'https://chatgpt.com/')
+const engineHost = await import(pathToFileURL(path.join(PKG, 'index.js')).href)
+const chatText = exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output', '', opts, undefined, '', '', '', 'chatgpt')
+ok('选 ChatGPT 时请求指向 chatgpt.com 而不是 grok.com', chatText.includes('https://chatgpt.com/') && !chatText.includes('grok.com'), chatText.slice(0, 200))
+ok('请求文案里的引擎名跟着变（ChatGPT 输入框/比例按钮）', chatText.includes('在 ChatGPT（Edge） 里出图') && chatText.includes('贴进 ChatGPT（Edge） 输入框') && chatText.includes('切 ChatGPT（Edge） 页面上的同名比例按钮'))
+ok('browser_open 步骤带 use:"edge" 与所选 url', chatText.includes('browser_open(use:"edge", url:"https://chatgpt.com/")'))
+const grokEngineText = exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output', '', opts, undefined, '', '', '', 'grok')
+ok('选 Grok（或不传）时仍是 grok.com', grokEngineText.includes('https://grok.com/') && !grokEngineText.includes('chatgpt.com'))
+ok('不传引擎的老调用方仍走 Grok（向后兼容）', exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output').includes('https://grok.com/'))
+ok('面板渲染出生图引擎下拉（Grok + ChatGPT 两个 option）', /data-dvp-engine/.test(source) && source.includes("label: 'ChatGPT（Edge）'") && source.includes("'生图引擎'"))
+ok('宿主 IMAGE_ENGINES 与客户端候选对齐（value/url）', ['grok', 'chatgpt'].every((v) => engineHost.IMAGE_ENGINES[v] !== undefined
+  && engines.some((e) => e.value === v && e.url === engineHost.IMAGE_ENGINES[v].url)))
+ok('宿主 normalizeImageEngine 非法值退默认 grok', engineHost.normalizeImageEngine('nano-banana') === 'grok'
+  && engineHost.normalizeImageEngine('CHATGPT') === 'chatgpt' && engineHost.normalizeImageEngine(undefined) === 'grok')
+ok('CORS 白名单收 chatgpt 域与成图 CDN', engineHost.GROK_SAVE_ALLOWED_ORIGINS.includes('https://chatgpt.com')
+  && engineHost.GROK_SAVE_ALLOWED_ORIGINS.includes('https://*.oaidimgs.net') && engineHost.GROK_SAVE_ALLOWED_ORIGINS.includes('https://grok.com'))
+ok('origin 判别器认得两家（grok/chatgpt），陌生源返回空串', engineHost.engineForOrigin('https://chatgpt.com') === 'chatgpt'
+  && engineHost.engineForOrigin('https://raic.oaidimgs.net') === 'chatgpt' && engineHost.engineForOrigin('https://grok.com') === 'grok'
+  && engineHost.engineForOrigin('') === '' && engineHost.engineForOrigin('https://evil.example') === '')
+
 // ── 3d. 来源文本（小说正文 / 章纲）─────────────────────────────────────────
 section('3d) 来源文本（按主要情节生图）')
 
@@ -311,8 +340,8 @@ ok('清晰度下拉渲染出来了', panelHtml.includes('清晰度') && panelHtm
 ok('画幅下拉渲染出来了', panelHtml.includes('画幅') && panelHtml.includes('9:16 全竖'))
 ok('张数下拉渲染出来了', panelHtml.includes('每个提示词张数'))
 ok('清晰度档位按低到高渲染', panelHtml.indexOf('720p') < panelHtml.indexOf('1080p') && panelHtml.indexOf('1080p') < panelHtml.indexOf('2K'))
-// 三个生图要求 + 一个层数 = 4 个 select（原来还有一个「路径」下拉，v0.4.0 换成了顶部栏目条）
-ok('下拉都是 select 元素（原生控件，主题无关）', (panelHtml.match(/<select/g) || []).length === 4, panelHtml.match(/<select/g))
+// 三个生图要求 + 一个引擎 + 一个层数 = 5 个 select（v0.7.0 加了「生图引擎」下拉；原来还有一个「路径」下拉，v0.4.0 换成了顶部栏目条）
+ok('下拉都是 select 元素（原生控件，主题无关）', (panelHtml.match(/<select/g) || []).length === 5, panelHtml.match(/<select/g))
 ok('每个选项都渲染成 option', (panelHtml.match(/<option/g) || []).length >= 17, (panelHtml.match(/<option/g) || []).length)
 ok('有扫描层数下拉（默认 4 层）', panelHtml.includes('层数') && panelHtml.includes('只看这一层') && panelHtml.includes('8 层'))
 // v0.4.0：顶部四个栏目取代原「路径」下拉（用户 2026-09-14：像会话区 对话/轨迹/费用 那样分栏）

@@ -1,5 +1,45 @@
 # 变更记录
 
+## 0.7.0 — 2026-09-16 · 生图引擎可选（Grok / ChatGPT·Edge）+ 大纲不再写死引擎
+
+**需求原话**（用户）："生图插件现在新增功能：用 edge 里的 ChatGPT 生图。然后是那些生图的大纲里
+不要写死用 grok 生，有时候只需要让 DeepSeek 识别爆款元素然后再总结归纳到别处去生，
+所以用什么生图写在具体 UI 里，生 Prompt 也是"。
+
+**做了什么**：
+- `index.js` 新增引擎注册表 `IMAGE_ENGINES` / `IMAGE_ENGINE_DEFAULT = 'grok'` / `normalizeImageEngine`
+  （不认识的引擎名一律落回 `grok`，`POST /dvp/grok/plan` 显式传错则 400）。每个引擎带自己的
+  站点、称呼、驱动话术；`driverDoc()` 按引擎生成，`kindLabel('grok')` 改成中性词"出图批次"。
+- **批次建时绑引擎、之后改不动**：`engine` 落 `plan.json`，重试同一批只认盘上那份；
+  跨引擎的页面来存图被**新增的门①b** 拒掉（403，理由 `引擎不匹配：批次 … 是 … 的批次，
+  这个页面（…）属于 …；换引擎请新建批次`）。门序是 ①CORS → **①b 引擎归属** → ② nonce → ③ 魔数，
+  所以"引擎不对"不会被"nonce 不对"盖住。
+- `GROK_SAVE_ALLOWED_ORIGINS` 加 `https://chatgpt.com` 与通配项 `https://*.oaidimgs.net`
+  （ChatGPT 成图 CDN；通配项只放真子域，裸域不放）。`engineForOrigin()` 按解析后的 hostname 认家：
+  grok.com/.grok.com/x.ai/.x.ai ⇒ `grok`；chatgpt.com/.chatgpt.com 及 `*.oaidimgs.net` 的真子域 ⇒ `chatgpt`；
+  认不出来（无 Origin 的同源调用、未登记站点）⇒ 不触发门①b，保持旧行为。
+- nonce 台账分键从 `batchId` 改成 `引擎 + '\0' + batchId`，另一家的页面拿不到本家的钥匙。
+- `client.js`：「生图要求」行第一个控件是 `生图引擎` 下拉（`GROK`/`CHATGPT` 两个选项，
+  标签为 `Grok` / `ChatGPT（Edge 登录态）`），页脚写 `用 <引擎> 生图`，派发体带 `engine`；
+  `HOWTO_STEPS` 里的"用 Grok 生图"改成随引擎取词。
+- **大纲/skill 文档去写死**：`生图-背后的-skill-逻辑-初版` 的 05/06 页不再出现"用 Grok 生图"，
+  改成"用哪家生图、提示词交给谁写，都在面板的「生图要求」里选；这份大纲只讲流程，不锁定引擎"，
+  产物路径统一写成 `<批次目录>/…` 并注明"目录名 `grok-output` 是历史沿革，引擎以 plan.json 为准"。
+  重渲染 `生图-skill逻辑大纲-v2.pptx`（59 个可编辑对象，`pptd_check` 0 issue）。
+
+**测试**：`verify-grok-bytes.mjs` 新增 2g 节（17 项）——同批同引擎 200、三种跨引擎组合 403
+且理由必须是"引擎不匹配"、并断言门①b 先于门②；`selfcheck.mjs` 新增 3c2 节（引擎可选 + 镜像一致）。
+套件计数：probe-host 208 / watch-idle 18 / **verify-grok-bytes 224**（原 207）/ **selfcheck 300**（原 286），
+`node tools/run-all.mjs` 4/4 通过、语法门禁 0/0。
+
+**修掉的测试自身缺陷**：2g 原先把 Origin 传进了 `postRaw` 的第 3 个参数（那个位置是 `contentType`），
+于是**根本没发 Origin**，走的是"同源 ⇒ 门①b 放行"的路，x1/x2 的 403 断言假绿。
+改用 `postRawOrigin(bytes, qs, origin)` 后三条跨引擎用例才真正打到门①b，另加 x4 反向 sanity。
+
+**未验证**：ChatGPT 页面的取图时机与成图 URL 形态**没有在真实账号上实测过**
+（Grok 那套结论来自 2026-09-11 实测）。`*.oaidimgs.net` 这个 Origin 是推测加进白名单的，
+第一次真跑请盯着看。
+
 ## 0.6.3 — 2026-09-15 · pick-dir 补传 AbortSignal（修 live 上弹框根本不出现的 500）
 
 **实测踩坑**（用户："再测一次给我看"）：live 宿主 `POST /dvp/pick-dir` → 500

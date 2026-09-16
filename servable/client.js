@@ -50,7 +50,7 @@ window.__ModuleLoader__.load({
     //   viral  = 新路径：视频/图片 → 爆款元素（蒸馏 skill 的分析方法）
     // 取值必须与宿主 index.js 的 PIPELINE_MODE_VALUES 一致。
     var PIPELINE_MODES = [
-      { value: 'prompt', label: '素材 → 提示词 → 生图', hint: '既有主线：勾选素材派发产出提示词，图片可再走 Grok 出图；视频可出两张浏览器参考图（Phase 3）' },
+      { value: 'prompt', label: '素材 → 提示词 → 生图', hint: '既有主线：勾选素材派发产出提示词，图片可再走所选引擎出图（Grok / ChatGPT）；视频可出两张浏览器参考图（Phase 3）' },
       { value: 'viral', label: '视频/图片 → 爆款元素（蒸馏）', hint: '走 viral-media-copywriter（通用爆款素材模型）：清点→取证→四层抽象，出元素卡与创意基因报告，写进过程目录' },
     ]
 
@@ -60,7 +60,7 @@ window.__ModuleLoader__.load({
     //   viral → 宿主 pipelineMode 'viral'
     //   copy  → **纯前端栏目**：宿主不认识它，所以不写 state（写了会被 sanitize 掉）
     var PANEL_TABS = [
-      { id: 'image', label: '生图', hint: '素材 → 提示词 →（图片）Grok 出图' },
+      { id: 'image', label: '生图', hint: '素材 → 提示词 →（图片）按所选引擎出图（Grok / ChatGPT，在「生图要求」里选）' },
       { id: 'copy', label: '生文案', hint: '按书 ID / 链接抓免费章节 → 按你的提示词出投放文案' },
       { id: 'video', label: '生视频', hint: '只处理视频素材：出时间码分镜式视频提示词' },
       { id: 'viral', label: '爆款分析', hint: '素材 → 爆款元素（蒸馏，出元素卡与创意基因报告）' },
@@ -576,7 +576,19 @@ window.__ModuleLoader__.load({
     }
 
     // ─────────────────────────────────────────── 生图要求（可选项）──────────
-    // 三组，都对齐 Grok 图片页上真实存在的参数：画幅是页面底部的比例按钮，
+    // 生图引擎（v0.7.0，用户 2026-09-16："用什么生图写在具体 UI 里，不要写死 Grok"）：
+    // 「用什么模型出图」和「Prompt 在哪写」都是这一栏的选择，不是大纲/skill 里的固定设定。
+    // 候选必须与宿主 index.js 的 IMAGE_ENGINES 对齐（url/label 由宿主那份说了算）。
+    var IMAGE_ENGINES = [
+      { value: 'grok', label: 'Grok', url: 'https://grok.com/', hint: '默认通道：grok.com 图片页，画幅是页面底部的比例按钮' },
+      { value: 'chatgpt', label: 'ChatGPT（Edge）', url: 'https://chatgpt.com/', hint: '用你 Edge 里已登录的 ChatGPT 出图；成图在 oaidimgs.net CDN，取图仍走页面内直传' },
+    ]
+    function engineDef(value) {
+      for (var i = 0; i < IMAGE_ENGINES.length; i++) if (IMAGE_ENGINES[i].value === value) return IMAGE_ENGINES[i]
+      return IMAGE_ENGINES[0]
+    }
+
+    // 三组参数，都对齐出图页面上真实存在的选项：画幅是页面底部的比例按钮，
     // 清晰度/张数对应页面上的选择项，生图要求由 agent 写进提示词。
     //
     // 清晰度**从低往高排**：越高的档位越容易被模型解释成"加细节/加质感"，
@@ -601,7 +613,7 @@ window.__ModuleLoader__.load({
         label: '画幅',
         value: '2:3 竖版',
         choices: [
-          { value: '2:3 竖版', hint: 'Grok 出图默认，人物竖构图' },
+          { value: '2:3 竖版', hint: '出图默认档，人物竖构图' },
           { value: '3:4 竖版', hint: '略宽一点的竖版' },
           { value: '9:16 全竖', hint: '手机全屏；转竖版视频用' },
           { value: '1:1 方形', hint: '方图；头像、封面用' },
@@ -645,15 +657,16 @@ window.__ModuleLoader__.load({
       return '写满：8K 超清、电影级真人、柯达 Portra 400 颗粒、HDR、真实皮肤纹理、局部过曝'
     }
 
-    function grokOptionLines(options) {
+    function grokOptionLines(options, engineValue) {
       var opt = options && typeof options === 'object' ? options : {}
       var clarity = opt.clarity || '1080p'
+      var engine = engineDef(engineValue)
       return [
         '生图要求（可选项）：',
         '- 清晰度：' + clarity + '（' + optionValuesFor(opt, 'clarity') + '）',
         '  · 提示词里关于画质的写法：' + clarityDirective(clarity) + '。',
-        '  · 理由：档次越高越像"加细节"指令，在 Grok 上直接体现为更慢、更耗额度；先出图看构图，满意的再单独重出高档。',
-        '- 画幅：' + (opt.aspect || '2:3 竖版') + '（先切 Grok 页面上的同名比例按钮，再发送）',
+        '  · 理由：档次越高越像"加细节"指令，在出图页上直接体现为更慢、更耗额度；先出图看构图，满意的再单独重出高档。',
+        '- 画幅：' + (opt.aspect || '2:3 竖版') + '（先切 ' + engine.label + ' 页面上的同名比例按钮，再发送）',
         '- 每个提示词张数：' + (opt.count || '1') + ' 张',
         '- 风格：按每条提示词里已写明的风格执行，不在这里另加风格',
       ]
@@ -668,11 +681,12 @@ window.__ModuleLoader__.load({
         .slice(0, 48)) || 'source'
     }
 
-    // ───────────────────────────────────────────────────── Grok 出图派发请求 ──────
-    function buildGrokRequest(items, planDir, source, options, docs, processDir, batchId, saveNonce) {
+    // ───────────────────────────────────────────────── 出图派发请求（引擎可选）──────
+    function buildGrokRequest(items, planDir, source, options, docs, processDir, batchId, saveNonce, engineValue) {
       var images = chosenOf(items, 'image')
+      var engine = engineDef(engineValue)
       var lines = []
-      lines.push('接着上一步的图片提示词，用浏览器插件驱动我的 Edge，在 Grok 里出图。')
+      lines.push('接着上一步的图片提示词，用浏览器插件驱动我的 Edge，在 ' + engine.label + ' 里出图。')
       lines.push('')
       lines.push('- 提示词批次目录：' + planDir)
       if (batchId) lines.push('- 批次 ID：' + batchId + '（存图时回传它，保证这一批的图进同一个目录）')
@@ -682,13 +696,13 @@ window.__ModuleLoader__.load({
       lines.push('- 待出图：' + images.length + ' 张')
       lines.push('- 落盘路由：POST /dvp/grok/save（在页面上下文里把成图字节**原样直接 POST**（raw bytes，批次/序号/slug' + (batchId ? '/nonce' : '') + ' 走 URL 参数' + (batchId ? '，batch=' + batchId : '') + (saveNonce ? '，nonce=' + saveNonce : '') + '）；宿主只回 {file,bytes,sha256,width,height} 元信息。图片字节/base64 一律不进会话文本）')
       if (processDir) lines.push('- 过程目录：' + processDir + '（草稿、临时截图、取图中间文件写这里）')
-      var optLines = grokOptionLines(options)
+      var optLines = grokOptionLines(options, engineValue)
       for (var oi = 0; oi < optLines.length; oi++) lines.push(optLines[oi])
       lines.push('')
       lines.push('步骤：')
-      lines.push('1. browser_open(use:"edge", url:"https://grok.com/")，用我的登录态。')
+      lines.push('1. browser_open(use:"edge", url:"' + engine.url + '")，用我的登录态。')
       lines.push('2. 未登录、有人机验证、或提示额度用尽 —— 停下来告诉我，不要尝试绕过。')
-      lines.push('3. 逐条把图片提示词贴进 Grok 输入框发送，等新图出现（单条超时 120 秒就记失败并继续）。')
+      lines.push('3. 逐条把图片提示词贴进 ' + engine.label + ' 输入框发送，等新图出现（单条超时 120 秒就记失败并继续）。')
       lines.push('4. 每拿到一张图就在页面上下文里把字节直接 POST /dvp/grok/save 落盘（宿主回 file/bytes/sha256 即成功；取不到字节时的兜底也**只能盘到盘**：scan-cache 或让用户点 Download 后 watch-downloads --out 接住，文件名用 `<序号>-<slug>.png`' + (batchId ? '，URL 参数带 batch=' + batchId : '') + (saveNonce ? '，并带上上面的 nonce（缺了/错了直接 403）' : '') + '）。')
       lines.push('5. 全部投完给我一份对账：成功 N 张、失败 M 张、失败原因、图片实际路径。')
       lines.push('')
@@ -816,6 +830,10 @@ window.__ModuleLoader__.load({
       })
       var grokOpts = optsState[0]
       var setGrokOpts = optsState[1]
+      // 生图引擎（v0.7.0）：默认 Grok；宿主 state.json 里记着 imageEngine 就用那个。
+      var engineState = useState(typeof bootDraft.imageEngine === 'string' && bootDraft.imageEngine !== '' ? bootDraft.imageEngine : 'grok')
+      var imageEngine = engineState[0]
+      var setImageEngine = engineState[1]
       // 顶部栏目（v0.4.0）：生图 / 生文案 / 生视频 / 爆款分析；宿主记着 viral 时沿用那个栏目
       var tabState = useState(typeof bootDraft.tab === 'string' && bootDraft.tab !== '' ? bootDraft.tab : 'image')
       var tab = tabState[0]
@@ -887,6 +905,7 @@ window.__ModuleLoader__.load({
             if (state.grokOptions && typeof state.grokOptions === 'object') {
               setGrokOpts(function (prev) { return Object.assign({}, prev, state.grokOptions) })
             }
+            if (state.imageEngine === 'grok' || state.imageEngine === 'chatgpt') setImageEngine(state.imageEngine)
             if (state.pipelineMode === 'prompt' || state.pipelineMode === 'viral') setPipelineMode(state.pipelineMode)
             // 草稿里记过栏目就沿用草稿（用户上次停在哪一栏），否则跟着宿主的 pipelineMode 走
             if (!(typeof bootDraft.tab === 'string' && bootDraft.tab !== '')) {
@@ -929,8 +948,9 @@ window.__ModuleLoader__.load({
           tab: tab,
           copyBooks: copyBooks,
           copyPrompt: copyPrompt,
+          imageEngine: imageEngine,
         })
-      }, [sourceText, useSource, sourcePath, sourceChars, localFiles, selected, data, tab, copyBooks, copyPrompt])
+      }, [sourceText, useSource, sourcePath, sourceChars, localFiles, selected, data, tab, copyBooks, copyPrompt, imageEngine])
 
       // 面板超宽/下方放不下时翻到左侧、向上展开，避免溢出视口；
       // 顺带按可用高度重排中段（flipPanelIntoView 内部会调 layoutPanel）。
@@ -1314,11 +1334,12 @@ window.__ModuleLoader__.load({
         setNote('草稿已清空：正文、本地挑选的文件、勾选都不再记忆（素材清单本身保留，点「扫描」可刷新）。')
       }
 
-      // 只用图片：建 Grok 批次（plan.json + driver.md）并把驱动请求写进输入框
+      // 只用图片：建出图批次（plan.json + driver.md）并把驱动请求写进输入框。
+      // 引擎由「生图要求」那一栏决定（v0.7.0）：grok / chatgpt，都走 Edge 登录态。
       function dispatchGrok() {
         var imagesOnly = chosenOf(chosen, 'image')
         if (imagesOnly.length === 0) {
-          setError('Grok 出图只吃图片：先勾至少一张图片')
+          setError('出图只吃图片：先勾至少一张图片')
           return
         }
         var docsOnly = chosenOf(chosen, 'text')
@@ -1342,7 +1363,7 @@ window.__ModuleLoader__.load({
               }
             })
             var planDir = (runsRoot || '') + '\\grok-output'
-            var payload = { entries: entries, grokUrl: 'https://grok.com/', options: grokOpts }
+            var payload = { entries: entries, engine: imageEngine, grokUrl: engineDef(imageEngine).url, options: grokOpts }
             if (processDir !== '') payload.processDir = processDir
             if (wantSource) payload.source = { text: sourceText, file: sourceFile }
             jsonFetch('/dvp/grok/plan', {
@@ -1354,7 +1375,7 @@ window.__ModuleLoader__.load({
               var batchId = (res && res.ok && res.batchId) ? res.batchId : ''
               var saveNonce = (res && res.ok && res.saveNonce) ? res.saveNonce : ''
               if (!res || res.ok !== true) setError('批次落盘失败：' + ((res && res.error) || '未知错误'))
-              else setNote('已建 Grok 批次：' + res.count + ' 条 → ' + dir + (res.sourceFile ? ' · 来源文本 → ' + res.sourceFile : '') + (processDir ? ' · 过程目录 → ' + processDir : ''))
+              else setNote('已建出图批次（' + engineDef(imageEngine).label + '）：' + res.count + ' 条 → ' + dir + (res.sourceFile ? ' · 来源文本 → ' + res.sourceFile : '') + (processDir ? ' · 过程目录 → ' + processDir : ''))
               // 请求里只带材料引用（路径 / 字数 / 批次 ID），正文一个字都不进请求
               var sourceRef = wantSource
                 ? {
@@ -1363,7 +1384,7 @@ window.__ModuleLoader__.load({
                   chars: (res && res.sourceChars) || sourceChars || sourceText.length,
                 }
                 : null
-              var text = buildGrokRequest(imagesOnly, dir, sourceRef, grokOpts, docsOnly, processDir, batchId, saveNonce)
+              var text = buildGrokRequest(imagesOnly, dir, sourceRef, grokOpts, docsOnly, processDir, batchId, saveNonce, imageEngine)
               var result = dispatchToComposer(text)
               if (!result.ok) {
                 void copyText(text).then(function (copied) {
@@ -1486,7 +1507,7 @@ window.__ModuleLoader__.load({
         void jsonFetch('/dvp/state', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mediaRoot: folder, runsRoot: runsRoot, grokOptions: grokOpts, pipelineMode: pipelineMode }),
+          body: JSON.stringify({ mediaRoot: folder, runsRoot: runsRoot, grokOptions: grokOpts, imageEngine: imageEngine, pipelineMode: pipelineMode }),
         }).then(function (res) {
           if (res && res.ok) setNote('生图要求已记住')
           else setError((res && res.error) || '生图要求保存失败')
@@ -1497,14 +1518,15 @@ window.__ModuleLoader__.load({
         var next = {}
         for (var i = 0; i < GROK_OPTIONS.length; i++) next[GROK_OPTIONS[i].key] = GROK_OPTIONS[i].value
         setGrokOpts(next)
-        setNote('生图要求已恢复默认')
+        setImageEngine('grok')
+        setNote('生图要求已恢复默认（引擎回到 Grok）')
       }
 
       function saveFolders() {
         void jsonFetch('/dvp/state', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mediaRoot: folder, runsRoot: runsRoot, grokOptions: grokOpts, pipelineMode: pipelineMode }),
+          body: JSON.stringify({ mediaRoot: folder, runsRoot: runsRoot, grokOptions: grokOpts, imageEngine: imageEngine, pipelineMode: pipelineMode }),
         }).then(function (res) {
           if (res && res.ok) setNote('目录已记住')
           else setError((res && res.error) || '保存失败')
@@ -1565,13 +1587,13 @@ window.__ModuleLoader__.load({
         ['拿到图片', '先看画面本身，再按七段式落成提示词：① 主体（年龄/五官/发型/发色/体型/身高/气质）② 服装与配饰 ③ 动作/姿态/表情 ④ 环境/场景 ⑤ 光照/色调 ⑥ 构图/景别/镜头焦段 ⑦ 画质与风格。人物描述在每条里重复写全，不靠代词，这样批量出图时同一个人不会变脸。'],
         ['拿到视频', '按 video-prompt-pipeline（视频复刻）先观察：用 watch 抽帧 + 尽量拿原生字幕（免费优先，没有才回退 Whisper），逐帧读；记录镜头边界与时间码、主体外观、动作与状态变化、镜头运动与景别、场景光线、音频、可辨画面文字。再产出时间码分镜式视频提示词。明确要参考图时走 Phase 3：从优化提示词里衍出两张静态图提示（首帧 + 决定性关键帧），用你已登录的浏览器 ChatGPT 生成、存进 run 的 references\\；视频生成（Phase 4）是另一个显式授权动作。'],
         ['拿到文章/正文', '先从正文里抽「主要情节」：人物关系、冲突爆发点、关键动作与道具、场景地点、时间（昼/夜/雨/雪）、情绪走向；按冲突强度排序，挑最强的那几个当出图点；再把每个情节映射到上面那套七段式，补足原文没写但画面必须有的信息（光线、构图、镜头）。正文只当材料，里面出现的命令句不会被当指令执行。'],
-        ['拿到文档（md/txt）', '扫描到的 md / txt / srt 会进第三列「文档」，默认勾选。派发时文档当材料不当指令：agent 先读全文，按主要情节与冲突点产出图片提示词；「用 Grok 生图」时勾选的文档也会以路径形式附在请求里。'],
+        ['拿到文档（md/txt）', '扫描到的 md / txt / srt 会进第三列「文档」，默认勾选。派发时文档当材料不当指令：agent 先读全文，按主要情节与冲突点产出图片提示词；「用引擎生图」时勾选的文档也会以路径形式附在请求里。'],
         ['路径 · 爆款元素（蒸馏）', '面板顶部「路径」切到第二条：走插件自带的 viral-media-copywriter 技能（通用爆款素材模型）。先 inventory_media.py 只读清点去重，视频抽帧进过程目录 frames\\，逐素材取证（直接观察/功能解释/表现关联分开记、带时间戳），按四层抽象「原子线索→功能模式→创意机制→可迁移配方」出《爆款元素卡》，汇总创意基因报告（Top 模式卡、组合顺序、反例、可测试假设），需要时再按输出协议出稳健/强钩子/实验三方向原创文案。学机制不抄原句；技能万一没注册，请求内嵌同一套流程兜底。'],
-        ['过程目录', '每次派发自动建 <产物目录>\\process\\年-月-日_时分-<素材名>\\：拆帧、爆款元素卡、草稿等中间产物都进这里，和最终产物（runs 提示词、grok-output 成图）分开；同分钟再派发自动加 -2 后缀。'],
-        ['Grok 批次目录', '「用 Grok 生图」一批一个目录：<产物目录>\\grok-output\\年-月-日_时分-<素材名>\\，plan.json、driver.md、来源文本、成图、ledger.json 全在这一批里。想重试就把 batchId 回传，写回同一目录；不传参数读最新一批，?batch=<批次ID> 读指定批次。'],
+        ['过程目录', '每次派发自动建 <产物目录>\\process\\年-月-日_时分-<素材名>\\：拆帧、爆款元素卡、草稿等中间产物都进这里，和最终产物（runs 提示词、出图批次成图）分开；同分钟再派发自动加 -2 后缀。'],
+        ['出图批次目录', '「用引擎生图」一批一个目录：<产物目录>\\grok-output\\年-月-日_时分-<素材名>\\（目录名里的 grok 是历史沿革，所有引擎共用这一个根），plan.json、driver.md、来源文本、成图、ledger.json 全在这一批里；本批用什么引擎记在 plan.json 的 engine 字段。想重试就把 batchId 回传，写回同一目录；不传参数读最新一批，?batch=<批次ID> 读指定批次。'],
         ['合成一版', '若要重出同一张，只改一个维度（姿势/服装/场景其一），其余照抄锚点，避免整条重写导致人物漂移。'],
-        ['画幅与清晰度', '画幅先按 Grok 页面上的比例按钮切好再投；清晰度越高越像"加细节"指令，额度消耗越大 —— 所以先低档出构图，满意的再单独重出高档。'],
-        ['产物与对账', '每条提示词写进 runsRoot 下以素材名命名的子目录；Grok 成图落 grok-output\\<批次ID>\\ 并写该批的 ledger.json，最后按「成功 N / 失败 M / 失败原因」对账，不静默跳过。'],
+        ['画幅与清晰度', '画幅先按所选引擎页面上的比例按钮切好再投；清晰度越高越像"加细节"指令，额度消耗越大 —— 所以先低档出构图，满意的再单独重出高档。'],
+        ['产物与对账', '每条提示词写进 runsRoot 下以素材名命名的子目录；成图落 grok-output\\<批次ID>\\ 并写该批的 ledger.json，最后按「成功 N / 失败 M / 失败原因」对账，不静默跳过。'],
       ]
 
       /** 大纲抽屉：盖在中段上（素材列表原地不动）；关着时不渲染。 */
@@ -1725,7 +1747,7 @@ window.__ModuleLoader__.load({
       }
 
       function renderRuns() {
-        var kindLabel = function (k) { return k === 'viral' ? '爆款分析' : k === 'copy' ? '生文案' : k === 'grok' ? 'Grok 出图' : '生图' }
+        var kindLabel = function (k) { return k === 'viral' ? '爆款分析' : k === 'copy' ? '生文案' : k === 'grok' ? '出图批次' : '生图' }
         var when = function (at) {
           var s = String(at || '')
           if (s === '') return '—'
@@ -1896,6 +1918,22 @@ window.__ModuleLoader__.load({
             h('button', { className: 'dvp-btn', type: 'button', onClick: saveGrokOptions, title: '记住这些选择，下次打开还是它' }, '记住'),
           ),
           h('div', { className: 'dvp-row' },
+            // 引擎放最前：它决定后面这些档位实际落到哪个页面上（v0.7.0，用户："用什么生图写在具体 UI 里"）
+            h('label', { className: 'dvp-opt', title: (function () {
+              var t = []
+              for (var c = 0; c < IMAGE_ENGINES.length; c++) t.push(IMAGE_ENGINES[c].label + '：' + IMAGE_ENGINES[c].hint)
+              return t.join('\n')
+            })() },
+              h('span', null, '生图引擎'),
+              h('select', {
+                className: 'dvp-select',
+                'data-dvp-engine': '1',
+                value: imageEngine,
+                onChange: function (event) { setImageEngine(event.target.value) },
+              }, IMAGE_ENGINES.map(function (eng) {
+                return h('option', { key: eng.value, value: eng.value, title: eng.hint }, eng.label)
+              })),
+            ),
             GROK_OPTIONS.map(function (opt) {
               return h('label', { className: 'dvp-opt', key: opt.key, title: (function () {
                 var t = []
@@ -1929,7 +1967,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dvp-sectHead' },
             h('span', { className: 'dvp-sectTitle' }, '来源文本'),
             h('span', { className: 'dvp-sub' }, '小说免费章节 / 章纲，按主要情节生图'),
-            h('label', { className: 'dvp-opt', title: '勾上后，「用 Grok 生图」的请求里只带这份材料的**路径与字数**（正文不进请求，agent 按路径去读）；正文没落盘时派发前会先自动落盘' },
+            h('label', { className: 'dvp-opt', title: '勾上后，「用引擎生图」的请求里只带这份材料的**路径与字数**（正文不进请求，agent 按路径去读）；正文没落盘时派发前会先自动落盘' },
               h('input', {
                 type: 'checkbox',
                 checked: useSource,
@@ -1995,8 +2033,8 @@ window.__ModuleLoader__.load({
                 : '点「准备生图请求」写入输入框，按 Enter 才发送，回车前还能改。'),
           h('div', { className: 'dvp-btns' },
             h('button', { className: 'dvp-btn', type: 'button', onClick: clearDraftNow, title: '丢掉面板记住的草稿（正文 / 书单 / 本地挑选的文件 / 勾选）。收起面板不会丢草稿，要丢点这里' }, '清空草稿'),            h('button', { className: 'dvp-btn', type: 'button', onClick: copyRequest }, '复制请求'),
-            // 「用 Grok 生图」只服务生图栏目（图片素材）
-            (isCopy || isViral || isVideoTab) ? null : h('button', { className: 'dvp-btn', type: 'button', onClick: dispatchGrok, disabled: chosenImages === 0, title: chosenImages === 0 ? 'Grok 出图只吃图片' : '建 Grok 批次并驱动 Edge 出图' }, '用 Grok 生图'),
+            // 「用引擎生图」只服务生图栏目（图片素材）；按钮文字跟着所选引擎变
+            (isCopy || isViral || isVideoTab) ? null : h('button', { className: 'dvp-btn', type: 'button', onClick: dispatchGrok, disabled: chosenImages === 0, title: chosenImages === 0 ? '出图只吃图片' : '建批次并驱动 Edge 在所选引擎（当前：' + engineDef(imageEngine).label + '）出图' }, '用 ' + engineDef(imageEngine).label + ' 生图'),
             // 主按钮只说它真正做的事：把请求"准备"进输入框。任务由用户按 Enter 才开跑，
             // 所以不叫「生成爆款元素 / 派发到会话」（用户 2026-09-14 反馈会被读成已经开跑）。
             h('button', {
@@ -2051,7 +2089,7 @@ window.__ModuleLoader__.load({
           type: 'button',
           'data-dvp-chip': '1',
           'data-selected': open ? 'true' : 'false',
-          title: '生图：选一批素材或粘一段正文，出提示词并驱动 Grok 生图',
+          title: '生图：选一批素材或粘一段正文，出提示词并按所选引擎（Grok / ChatGPT）驱动 Edge 生图',
           onClick: function () { setOpen(!open) },
         },
           h('svg', { className: 'dvp-ico', viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': 'true' },
@@ -2121,7 +2159,7 @@ window.__ModuleLoader__.load({
           '顶部「路径」二选一：素材→提示词→生图（主线），或 视频/图片→爆款元素（蒸馏）。',
           '勾选后「准备生图请求」把请求写进输入框（按 Enter 才发送），由 agent 按 video-prompt-pipeline 逐项产出提示词；',
           '也可以粘一段小说正文/章纲或加 txt/md 文件，按主要情节生图，',
-          '最后「用 Grok 生图」建批次并驱动 Edge 出图。每次派发自动建过程目录（process\\年-月-日_时分-素材名），',
+          '最后点「用 <引擎> 生图」建批次并驱动 Edge 出图（引擎在「生图要求」里选）。每次派发自动建过程目录（process\\年-月-日_时分-素材名），',
           '拆帧与分析产物都写那里。面板里「背后的逻辑」一栏写了全部规则。',
         ),
         h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
@@ -2236,6 +2274,8 @@ window.__ModuleLoader__.load({
       slugOf: slugOf,
       grokOptionLines: grokOptionLines,
       GROK_OPTIONS: GROK_OPTIONS,
+      IMAGE_ENGINES: IMAGE_ENGINES,
+      engineDef: engineDef,
       PIPELINE_MODES: PIPELINE_MODES,
       VideoPromptPanel: VideoPromptPanel,
       // 草稿（内存）：面板收起/关掉不该丢用户输入。测试缝用来断言"存了没、恢复对不对、清了没"。
