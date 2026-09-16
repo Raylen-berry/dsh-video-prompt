@@ -131,6 +131,10 @@ window.__ModuleLoader__.load({
       '.dvp-x:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-label-primary)}',
       // 栏目条（v0.4.0）：像会话区的「对话 / 轨迹 / 费用」那样一排、下划线选中态（用户 2026-09-14）
       '.dvp-tabs{display:flex;align-items:center;gap:18px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.2));flex:none}',
+      // v0.7.1：引擎开关在栏目条右侧留一份（静默占位，不挤标签）——
+      // 面板是一整列滚动的，「生图要求」在下面，不滚到底就等于看不见这个选项。
+      '.dvp-engineTop{margin-left:auto;flex:0 0 auto;gap:4px}',
+      '.dvp-selectTop{height:24px;max-width:150px;padding:0 4px;font-size:11px}',
       '.dvp-tab{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:13px;font-weight:500;line-height:18px;padding:0 0 9px;position:relative;cursor:pointer}',
       '.dvp-tab:hover{color:var(--dsw-alias-label-primary)}',
       '.dvp-tab.on{color:var(--dsw-alias-state-business-primary,#4d6bfe)}',
@@ -1660,6 +1664,24 @@ window.__ModuleLoader__.load({
               onClick: function () { chooseTab(item.id) },
             }, item.label)
           }),
+          // 引擎开关在栏目条右侧再放一份（v0.7.1）：面板是整列滚动的，「生图要求」在文件列表下面，
+          // 不滚到底就等于没有这个选项（用户 2026-09-16："还需要加一个用 Edge 的 ChatGPT 生图选项"）。
+          // 与「生图要求」里那一栏共用同一个 state，两边同步；只在生图栏目出现。
+          tab === 'image' ? h('label', { className: 'dvp-opt dvp-engineTop', 'data-dvp-engine-top-wrap': '1', title: (function () {
+            var t = []
+            for (var c = 0; c < IMAGE_ENGINES.length; c++) t.push(IMAGE_ENGINES[c].label + '：' + IMAGE_ENGINES[c].hint)
+            return t.join('\n')
+          })() },
+            h('span', null, '引擎'),
+            h('select', {
+              className: 'dvp-select dvp-selectTop',
+              'data-dvp-engine-top': '1',
+              value: imageEngine,
+              onChange: function (event) { setImageEngine(event.target.value) },
+            }, IMAGE_ENGINES.map(function (eng) {
+              return h('option', { key: eng.value, value: eng.value, title: eng.hint }, eng.label)
+            })),
+          ) : null,
         )
       }
 

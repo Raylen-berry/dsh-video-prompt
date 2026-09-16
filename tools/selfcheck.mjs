@@ -266,6 +266,11 @@ const grokEngineText = exportsObj.internals.buildGrokRequest(items, 'D:/runs/gro
 ok('选 Grok（或不传）时仍是 grok.com', grokEngineText.includes('https://grok.com/') && !grokEngineText.includes('chatgpt.com'))
 ok('不传引擎的老调用方仍走 Grok（向后兼容）', exportsObj.internals.buildGrokRequest(items, 'D:/runs/grok-output').includes('https://grok.com/'))
 ok('面板渲染出生图引擎下拉（Grok + ChatGPT 两个 option）', /data-dvp-engine/.test(source) && source.includes("label: 'ChatGPT（Edge）'") && source.includes("'生图引擎'"))
+// v0.7.1（用户 2026-09-16："还需要加一个用 Edge 的 ChatGPT 生图选项"）：那一栏在文件列表下面，
+// 面板整列滚动 ⇒ 不滚到底就看不见。栏目条右侧补一份同样的开关，两处共用同一个 state。
+// 渲染出来的 DOM 断言放在下面拿得到 panelHtml 的地方（这里只能断言源码）。
+ok('栏目条引擎与「生图要求」里那一栏绑同一个 state', (source.match(/setImageEngine\(event\.target\.value\)/g) || []).length === 2)
+ok('栏目条引擎只在生图栏目出现（生文案/爆款不掺和）', /tab === 'image' \? h\('label', \{ className: 'dvp-opt dvp-engineTop'/.test(source))
 ok('宿主 IMAGE_ENGINES 与客户端候选对齐（value/url）', ['grok', 'chatgpt'].every((v) => engineHost.IMAGE_ENGINES[v] !== undefined
   && engines.some((e) => e.value === v && e.url === engineHost.IMAGE_ENGINES[v].url)))
 ok('宿主 normalizeImageEngine 非法值退默认 grok', engineHost.normalizeImageEngine('nano-banana') === 'grok'
@@ -340,14 +345,21 @@ ok('清晰度下拉渲染出来了', panelHtml.includes('清晰度') && panelHtm
 ok('画幅下拉渲染出来了', panelHtml.includes('画幅') && panelHtml.includes('9:16 全竖'))
 ok('张数下拉渲染出来了', panelHtml.includes('每个提示词张数'))
 ok('清晰度档位按低到高渲染', panelHtml.indexOf('720p') < panelHtml.indexOf('1080p') && panelHtml.indexOf('1080p') < panelHtml.indexOf('2K'))
-// 三个生图要求 + 一个引擎 + 一个层数 = 5 个 select（v0.7.0 加了「生图引擎」下拉；原来还有一个「路径」下拉，v0.4.0 换成了顶部栏目条）
-ok('下拉都是 select 元素（原生控件，主题无关）', (panelHtml.match(/<select/g) || []).length === 5, panelHtml.match(/<select/g))
+// 三个生图要求 + 页内引擎 + 栏目条引擎 + 一个层数 = 6 个 select
+// （v0.7.0 加了「生图要求」里的「生图引擎」；v0.7.1 又在栏目条右侧留了一份，两处共用一个 state；
+//  原来还有一个「路径」下拉，v0.4.0 换成了顶部栏目条）
+ok('下拉都是 select 元素（原生控件，主题无关）', (panelHtml.match(/<select/g) || []).length === 6, panelHtml.match(/<select/g))
 ok('每个选项都渲染成 option', (panelHtml.match(/<option/g) || []).length >= 17, (panelHtml.match(/<option/g) || []).length)
 ok('有扫描层数下拉（默认 4 层）', panelHtml.includes('层数') && panelHtml.includes('只看这一层') && panelHtml.includes('8 层'))
 // v0.4.0：顶部四个栏目取代原「路径」下拉（用户 2026-09-14：像会话区 对话/轨迹/费用 那样分栏）
 ok('顶部栏目条有生图/生文案/生视频/爆款分析四个', ['生图', '生文案', '生视频', '爆款分析'].every((t) => panelHtml.includes(t))
   && (panelHtml.match(/role="tab"/g) || []).length === 4, (panelHtml.match(/role="tab"/g) || []).length)
 ok('默认停在「生图」栏目（主按钮随之是准备生图请求）', /data-dvp-tab="image"/.test(panelHtml) && panelHtml.includes('准备生图请求'))
+// v0.7.1：引擎开关在栏目条右侧也渲染一份（默认就停在生图栏目 ⇒ 静态渲染里应当正好一个），
+// 两个 select 各自从 IMAGE_ENGINES 生成 option ⇒ 「ChatGPT（Edge）」作为 option 文本正好出现两次
+// （label 的 title 里那份引擎清单也会带这个字面，所以按 option 文本数，别按裸字符串数）。
+ok('栏目条右侧也渲染了引擎下拉（不用滚到底也能换）', (panelHtml.match(/data-dvp-engine-top="1"/g) || []).length === 1)
+ok('两份引擎下拉都来自 IMAGE_ENGINES（没有第二份硬编码）', (panelHtml.match(/>ChatGPT（Edge）<\/option>/g) || []).length === 2, (panelHtml.match(/>ChatGPT（Edge）<\/option>/g) || []).length)
 ok('默认态主按钮是「准备生图请求」', panelHtml.includes('准备生图请求') && !panelHtml.includes('准备分析请求'))
 // v0.2.0（用户 2026-09-14 反馈）：主按钮只说它真正做的事 —— 把请求写进输入框、按 Enter 才开跑；
 // 面板底部另有独立的「清空草稿」入口（收起/关闭面板一律保留草稿，不再需要关闭确认框）。
