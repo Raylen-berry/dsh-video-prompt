@@ -65,8 +65,12 @@ window.__ModuleLoader__.load({
     // 或者视频，两两交互，四种路径"）：**栏目 = 产物类型，素材 = 图 / 视频都行**，于是
     //   图片 → 图（图生图）· 图片 → 视频（图生视频）· 视频 → 图（视频生图）· 视频 → 视频（视频生视频）
     // 四条路都通。素材那一维不再由栏目单方面锁死（生图栏以前只列图片+文档、生视频栏只列视频）。
+    // v0.10.0 新增「扒素材」（用户 2026-09-17："这轮的操作嵌入生图插件里，新增栏目'扒素材'，
+    // 放在生文案和爆款分析之间"）：竞品在投素材的抓取派发器。它和生文案一样是**纯前端栏目**
+    // （宿主不认识 scrape 这个值 ⇒ 不写 state），不吃本地素材勾选（kinds: []）。
     var PANEL_TABS = [
       { id: 'copy', label: '生文案', hint: '按书 ID / 链接抓免费章节 → 按你的提示词出投放文案', kinds: [] },
+      { id: 'scrape', label: '扒素材', hint: '竞品名 → 到广大大 / AdXray 搜在投素材并下载到参考目录（抓取由 agent 用浏览器做）', kinds: [] },
       { id: 'viral', label: '爆款分析', hint: '素材 → 爆款元素（蒸馏，出元素卡与创意基因报告）；只吃图片/视频', kinds: ['video', 'image'] },
       { id: 'image', label: '生图', hint: '素材（图片或视频）→ 执行 AI（B）按 A 写图片提示词（C）→ 最后选引擎（D）出图、回收成图（E）：图生图 / 视频生图', kinds: ['video', 'image', 'text'] },
       { id: 'video', label: '生视频', hint: '素材（视频或图片）→ 执行 AI（B）按 A 写视频提示词：视频生视频 / 图生视频（暂无出片引擎，产物就是提示词）', kinds: ['video', 'image'] },
@@ -77,7 +81,7 @@ window.__ModuleLoader__.load({
       return ['video', 'image', 'text']
     }
     /** 栏目 ⇒ **产物类型**（2×2 里产物那一维，v0.9.0）：生图栏目出图片提示词、生视频栏目出视频提示词。
-     *  生文案/爆款分析不产提示词（null）。 */
+     *  生文案 / 扒素材 / 爆款分析不产提示词（null）。 */
     function tabOutKind(id) {
       if (id === 'image') return 'image'
       if (id === 'video') return 'video'
@@ -116,6 +120,68 @@ window.__ModuleLoader__.load({
       if (processDir !== '') lines.push('过程目录（抓取的原文、草稿放这里）：' + processDir)
       if (processDir !== '') lines.push('存档要求：派发前把**这份请求原文**一字不差写进 ' + path_join(processDir, 'request.md') + '（设置页的「接着做 / 请求给 AI」靠它复放）')
       if (runsRoot !== '') lines.push('产物目录：' + runsRoot + '（每本书一个子目录）')
+      return lines.join('\n')
+    }
+
+    // ── 扒素材（v0.10.0）：竞品在投素材抓取 ────────────────────────────────────
+    // 平台口径来自 2026-09-17 那一轮实测：Novelbar / Novellair 在**广大大**有数据，
+    // storlyn / Novelbox / obnovel 只在 **AdXray** 有 —— 所以默认「自动」两家都试。
+    var SCRAPE_PLATFORMS = [
+      { value: 'auto', label: '自动（先广大大，无结果转 AdXray）', hint: '同一套筛选条件在两家各试一遍；第一家搜不到就换第二家，两家都没有就把这个品牌记为"没搜到"跳过' },
+      { value: 'guangdada', label: '广大大（SocialPeta）', hint: 'guangdada.net 展示广告页；素材直链在 resource_urls 里（视频 mp4 + 图 jpg）' },
+      { value: 'adxray', label: 'AdXray（DataEye）', hint: 'oversea-v2.dataeye.com 素材筛选页；素材直链在列表数据的 picList / videoList 里' },
+    ]
+    /** 扒素材栏目：把「品牌名 + 页码 + 平台」组织成一条抓取请求。
+     *  SOP 是 2026-09-17 那轮跑通并抽查过的版本，逐条写死在这里 —— 面板只准备请求，
+     *  真正动手的是会话里的 agent（与生文案同一套分工）。
+     *  brands: [{ name, pages }]；platform: SCRAPE_PLATFORMS 里的 value。 */
+    function buildScrapeRequest(brands, platform, destRoot, runsRoot, processDir, executorValue) {
+      var plat = null
+      for (var pi = 0; pi < SCRAPE_PLATFORMS.length; pi++) if (SCRAPE_PLATFORMS[pi].value === platform) plat = SCRAPE_PLATFORMS[pi]
+      if (!plat) plat = SCRAPE_PLATFORMS[0]
+      var lines = []
+      lines.push('按下面的竞品清单，到广告情报站上把它们**在投的素材**扒下来存进参考目录（这是抓素材，不是出提示词、也不是生图）。')
+      lines.push('')
+      lines.push(executorLine(executorValue, '用 dsh-browser-live 的浏览器工具按下面的 SOP 抓取（要你的登录态）；插件不自己爬，也不产出提示词'))
+      lines.push('')
+      lines.push('清单（' + brands.length + ' 个）：')
+      for (var i = 0; i < brands.length; i++) {
+        lines.push((i + 1) + '. ' + brands[i].name + ' — 第 ' + brands[i].pages.join('、') + ' 页')
+      }
+      lines.push('')
+      lines.push('平台：' + plat.label + '。' + (plat.value === 'auto' ? '（逐个品牌自己判断：第一家共找到 0 条或明显没有这个产品，就换第二家，并在对账里写明用了哪家）' : ''))
+      lines.push('落地目录：<根目录>\\<品牌名>，与其它品牌同级（例 D:\\Download\\Chrome\\素材视频\\参考\\storlyn）。根目录：' + (destRoot !== '' ? destRoot : '（未指定 —— 用 Chrome 当前下载目录，事后按修改时间归位）'))
+      lines.push('')
+      lines.push('## 每一家的筛选条件（两家都要套齐，缺一不可）')
+      lines.push('- 广大大 guangdada.net/modules/creative/display-ads：「快捷操作」点 **海外网文素材筛选**（它会一次带上 Top1%/Top10%创意 + 工具分类:网络小说/有声读物与电子书 + 国家/地区:欧洲/大洋洲/美国/加拿大 + 文案语言:英语）→ 时间 **30天** → 排序点 **投放天数** → 去重点 **素材** → 关键词框填品牌名 + 「精确搜索」勾上 → 点搜索按钮。')
+      lines.push('- AdXray oversea-v2.dataeye.com/playlet/playlet-material：「选择常用筛选项」下拉选 **海外网文素材筛选** → 去重方式选 **智能去重** → 高级筛选时间选 **近两年** → 勾上 **精准搜索** → 主搜索框填品牌名回车。')
+      lines.push('- ⚠ AdXray 那个预设会**把关键词一起清掉**（命中数会从几千跳回几亿），所以套完预设必须重新勾精准搜索、重新输品牌名，再核对命中数量级对不对。')
+      lines.push('')
+      lines.push('## 取素材直链（不要靠肉眼翻页面）')
+      lines.push('- 两家的列表数据都挂在 React fiber 上，从 `.grid-list-item` / 卡片节点往上走 `memoizedProps`，找那个长度 ≈ 每页条数的数组：')
+      lines.push('  · 广大大：`props.data.creative_list`，每条看 `resource_urls[0]`（有 `video_url` 就是视频，否则 `image_url`）+ `ad_key` + `days_count`；')
+      lines.push('  · AdXray：`props.items`，每条看 `materialType`（1=图片 2=视频）、`picList[0]` / `videoList[0]`、`materialId`、`releaseDay`。')
+      lines.push('- 翻页后**必须验证数据真的换了**（比对首条 materialId / ad_key，并确认接口请求里 pageId 或 page 变了）—— 本回合出现过点了页码只改高亮、不发请求的假死。')
+      lines.push('')
+      lines.push('## 下载（这一段是本回合踩出来的，照做别自由发挥）')
+      lines.push('1. **先确认 Chrome 的下载目录**（chrome://settings/downloads 我读不到也点不动，需要你手改，或者接受事后归位）。别一上来就开始下。')
+      lines.push('2. 在页面里 `fetch(url)` 拿 blob，再用 `<a download>` 触发保存。**一次 browser_eval 里串行下几十个必然超时**（CDP 求值有上限），要改成：后台循环把进度写进 `window.__DL={done,fail,running}`，我只轮询计数。')
+      lines.push('3. 并发 3 路而不是串行：串行约 26 秒/个，3 路能把 40 个压到 2 分钟级。')
+      lines.push('4. **不能只信计数**：本回合出现过 fetch 成功、计数 +1、但 Chrome 静默丢弃不落盘（也没有 .crdownload）。下完必须核盘：文件数、序号连续、有无 `(1)` 重复后缀、最小字节数。缺哪几个就单独补下那几个。')
+      lines.push('5. Chrome 对未授权站点只放行**第一个**自动下载，其余静默拦截 —— 报「只落了 1 个」就是这个原因，请人在地址栏右侧「已阻止下载」图标里选「始终允许该站点下载多个文件」，然后重跑剩余项。')
+      lines.push('6. 命名统一 `序号_投放天数d_素材ID.mp4|.png`（广大大用 ad_key，AdXray 用 materialId），序号即页面排序位，便于回溯。')
+      lines.push('')
+      lines.push('## 本机环境的既有限制（别再重复试）')
+      lines.push('- PowerShell / curl.exe 直连这些 CDN 一律 TLS 失败（`基础连接已经关闭` / schannel `SEC_E_NO_CREDENTIALS`），沙箱内拿不到凭证 —— **只能走浏览器下载**，不要在这上面浪费时间。')
+      lines.push('- chrome:// 页面扩展无权访问，任何"我去改浏览器设置"的方案都不成立。')
+      lines.push('')
+      lines.push('## 每个品牌的验收')
+      lines.push('- 抽 2–3 个视频用浏览器真解码（建一个临时 html，`<video>` 逐个 loadeddata + seek + 截图），核对时长与页面上的角标一致；这台机器没装 ffmpeg/ffprobe，别指望它。')
+      lines.push('- 最后交一份对账：每个品牌 命中总数 / 实际下了几个 / 用了哪家平台 / 缺哪些 / 落错位置的怎么归位的。没搜到的品牌如实写"没搜到"并跳过，不要拿近似品牌凑数。')
+      if (processDir !== '') lines.push('')
+      if (processDir !== '') lines.push('过程目录（对账、清单、临时探针放这里）：' + processDir)
+      if (processDir !== '') lines.push('存档要求：派发前把**这份请求原文**一字不差写进 ' + path_join(processDir, 'request.md') + '（设置页的「接着做 / 请求给 AI」靠它复放）')
+      if (runsRoot !== '') lines.push('产物目录：' + runsRoot)
       return lines.join('\n')
     }
 
@@ -693,10 +759,12 @@ window.__ModuleLoader__.load({
       return EXECUTOR_AIS[0]
     }
     /** 给派发请求写的 B 行：self 时如实说"就是你"，别家时带上要跳转的站点。 */
-    function executorLine(value) {
+    /** B（执行 AI）那一行。tail 可换掉结尾：默认写给"出提示词"的路径用，
+     *  而生文案 / 扒素材这类不产 C 的栏目要说的是另一件事（去抓材料），所以给个覆盖口。 */
+    function executorLine(value, tail) {
       var ex = executorDef(value)
-      if (ex.value === 'self') return '- 执行 AI（B）：本会话（就是你）—— 按 A（image-prompt-director 的导演规则）产出 C'
-      return '- 执行 AI（B）：' + ex.label + ' —— 第一步 browser_open(use:"edge", url:"' + ex.url + '")，把 A 的规则与素材要点喂给它，回收它写的 C（提示词）回填批次后再投给 D 出图'
+      if (ex.value === 'self') return '- 执行 AI（B）：本会话（就是你）—— ' + (tail || '按 A（image-prompt-director 的导演规则）产出 C')
+      return '- 执行 AI（B）：' + ex.label + ' —— ' + (tail || '第一步 browser_open(use:"edge", url:"' + ex.url + '")，把 A 的规则与素材要点喂给它，回收它写的 C（提示词）回填批次后再投给 D 出图')
     }
 
     // 三组参数，都对齐出图页面上真实存在的选项：画幅是页面底部的比例按钮，
@@ -960,6 +1028,17 @@ window.__ModuleLoader__.load({
       var promptState = useState(typeof bootDraft.copyPrompt === 'string' ? bootDraft.copyPrompt : '')
       var copyPrompt = promptState[0]
       var setCopyPrompt = promptState[1]
+      // 扒素材栏目（v0.10.0）的三个输入：品牌清单（一行一个，可带「第N页」）、平台、落地根目录。
+      // 与生文案一样只活在内存草稿里，不写宿主 state.json。
+      var scrapeListState = useState(typeof bootDraft.scrapeBrands === 'string' ? bootDraft.scrapeBrands : '')
+      var scrapeBrands = scrapeListState[0]
+      var setScrapeBrands = scrapeListState[1]
+      var scrapePlatformState = useState(typeof bootDraft.scrapePlatform === 'string' && bootDraft.scrapePlatform !== '' ? bootDraft.scrapePlatform : 'auto')
+      var scrapePlatform = scrapePlatformState[0]
+      var setScrapePlatform = scrapePlatformState[1]
+      var scrapeDestState = useState(typeof bootDraft.scrapeDest === 'string' ? bootDraft.scrapeDest : '')
+      var scrapeDest = scrapeDestState[0]
+      var setScrapeDest = scrapeDestState[1]
       // 来源文本（小说免费章节 / 章纲）：只存在浏览器内存里（草稿里记着，不写进宿主 state.json）
       var sourceState = useState(typeof bootDraft.sourceText === 'string' ? bootDraft.sourceText : '')
       var sourceText = sourceState[0]
@@ -1058,9 +1137,12 @@ window.__ModuleLoader__.load({
           tab: tab,
           copyBooks: copyBooks,
           copyPrompt: copyPrompt,
+          scrapeBrands: scrapeBrands,
+          scrapePlatform: scrapePlatform,
+          scrapeDest: scrapeDest,
           imageEngine: imageEngine,
         })
-      }, [sourceText, useSource, sourcePath, sourceChars, localFiles, selected, data, tab, copyBooks, copyPrompt, imageEngine])
+      }, [sourceText, useSource, sourcePath, sourceChars, localFiles, selected, data, tab, copyBooks, copyPrompt, scrapeBrands, scrapePlatform, scrapeDest, imageEngine])
 
       // 面板超宽/下方放不下时翻到左侧、向上展开，避免溢出视口；
       // 顺带按可用高度重排中段（flipPanelIntoView 内部会调 layoutPanel）。
@@ -1365,9 +1447,73 @@ window.__ModuleLoader__.load({
         })
       }
 
+      /** 扒素材栏目：解析品牌清单。一行一个，允许尾部带页码 ——
+       *  「storlyn 第2页」「storlyn,2」「storlyn:2」都认；不写就是第 1 页（用户口径：默认第 1 页）。 */
+      function scrapeBrandList() {
+        var raw = scrapeBrands.split(/[\n,，;；]+/)
+        var out = []
+        var seen = {}
+        for (var i = 0; i < raw.length; i++) {
+          var one = String(raw[i] || '').trim()
+          if (one === '') continue
+          var pages = [1]
+          var pm = one.match(/(?:第\s*([0-9\-~、,，和及]+)\s*页|[:：]\s*([0-9\-~、,，和及]+))\s*$/)
+          if (pm) {
+            one = one.replace(pm[0], '').trim()
+            var src = pm[1] || pm[2] || ''
+            var got = []
+            // 支持 "1-2"（区间）、"1、3"（枚举）、"2"（单页）
+            var bits = src.split(/[、,，和及]+/)
+            for (var b = 0; b < bits.length; b++) {
+              var rng = bits[b].match(/^\s*(\d+)\s*[-~至]\s*(\d+)\s*$/)
+              if (rng) {
+                var a = parseInt(rng[1], 10); var z = parseInt(rng[2], 10)
+                if (!(a > 0) || !(z > 0) || z - a > 20) continue
+                for (var q = Math.min(a, z); q <= Math.max(a, z); q++) if (got.indexOf(q) < 0) got.push(q)
+              } else {
+                var n = parseInt(bits[b], 10)
+                if (n > 0 && got.indexOf(n) < 0) got.push(n)
+              }
+            }
+            if (got.length) pages = got.sort(function (x, y) { return x - y })
+          }
+          if (one === '' || seen[one.toLowerCase()]) continue
+          seen[one.toLowerCase()] = true
+          out.push({ name: one, pages: pages })
+        }
+        return out
+      }
+
+      /** 扒素材栏目：抓取由 agent 用浏览器做（要用户的登录态），面板只准备请求。 */
+      function dispatchScrape() {
+        var brands = scrapeBrandList()
+        if (brands.length === 0) {
+          setError('先填至少一个竞品名（一行一个，可在行尾写「第2页」）')
+          return
+        }
+        setError('')
+        void ensureProcessDir(function (processDir) {
+          var text = buildScrapeRequest(brands, scrapePlatform, scrapeDest.trim(), runsRoot, processDir, executorAI)
+          var result = dispatchToComposer(text)
+          if (result.ok) {
+            var total = 0
+            for (var i = 0; i < brands.length; i++) total += brands[i].pages.length
+            setNote('已填入输入框（' + brands.length + ' 个品牌 / 共 ' + total + ' 页），等待发送 —— 按 Enter 才开始；收起面板也不丢草稿。')
+          } else {
+            void copyText(text).then(function (copied) {
+              setError(result.reason + (copied ? '，已改复制到剪贴板，粘贴后发送' : '，请点「复制请求」手动粘贴'))
+            })
+          }
+        })
+      }
+
       function dispatch() {
         if (tab === 'copy') {
           dispatchCopy()
+          return
+        }
+        if (tab === 'scrape') {
+          dispatchScrape()
           return
         }
         // v0.9.0 四种路径：**素材不再按栏目过滤**（chosen 已经只含本栏要分析的种类）——
@@ -1419,6 +1565,16 @@ window.__ModuleLoader__.load({
       }
 
       function copyRequest() {
+        if (tab === 'scrape') {
+          var sb = scrapeBrandList()
+          if (sb.length === 0) {
+            setError('先填至少一个竞品名（一行一个）')
+            return
+          }
+          void copyText(buildScrapeRequest(sb, scrapePlatform, scrapeDest.trim(), runsRoot, '', executorAI))
+          setNote('扒素材请求已复制（' + sb.length + ' 个品牌），粘贴到输入框按 Enter 才开始。')
+          return
+        }
         if (tab === 'copy') {
           var books = copyBookList()
           if (books.length === 0) {
@@ -1731,6 +1887,11 @@ window.__ModuleLoader__.load({
         parts.push('请求约 ' + chars + ' 字（约 ' + Math.round(chars / 1.5) + ' token，估算）')
         if (isCopy) {
           parts.push('书单 ' + copyBookList().length + ' 本（正文由 agent 抓，不进请求）')
+        } else if (tab === 'scrape') {
+          var sb = scrapeBrandList()
+          var sp = 0
+          for (var si = 0; si < sb.length; si++) sp += sb[si].pages.length
+          parts.push('竞品 ' + sb.length + ' 个 · 共 ' + sp + ' 页（素材由 agent 在站上抓，不进请求）')
         } else {
           // v0.9.0：素材两维都算得清（哪种素材都行，产物由栏目定）
           parts.push('素材 ' + chosen.length + ' 项（图片 ' + chosenOf(chosen, 'image').length + ' · 视频 ' + chosenOf(chosen, 'video').length + '）')
@@ -1796,6 +1957,55 @@ window.__ModuleLoader__.load({
             onChange: function (event) { setCopyPrompt(event.target.value) },
           }),
           h('div', { className: 'dvp-sub' }, '抓取由 agent 用浏览器工具**只读免费章节**（要你的登录态）；插件只负责把请求准备好。'),
+        )
+      }
+
+      /** 扒素材栏目的输入（v0.10.0）：竞品清单 + 平台 + 落地根目录。与素材区互斥（不吃勾选）。 */
+      function renderScrapeFields() {
+        var brands = scrapeBrandList()
+        var pages = 0
+        for (var i = 0; i < brands.length; i++) pages += brands[i].pages.length
+        return h('div', { className: 'dvp-sect', 'data-dvp-scrape': '1' },
+          h('div', { className: 'dvp-sectHead' },
+            h('span', { className: 'dvp-sectTitle' }, '竞品清单'),
+            h('span', { className: 'dvp-sub' }, '一行一个；行尾可写「第2页」「第1-2页」，不写就是第 1 页'),
+            h('div', { style: { flex: '1' } }),
+            h('span', { className: 'dvp-count' }, brands.length ? brands.length + ' 个 · ' + pages + ' 页' : '空'),
+          ),
+          h('textarea', {
+            className: 'dvp-ta',
+            value: scrapeBrands,
+            spellCheck: false,
+            'data-dvp-scrape-list': '1',
+            placeholder: '一行一个，例如：\nstorlyn\nNovelbox 第1页\nobnovel:1-2',
+            onChange: function (event) { setScrapeBrands(event.target.value) },
+          }),
+          h('div', { className: 'dvp-row', style: { marginTop: '8px' } },
+            h('label', { className: 'dvp-opt', title: '去哪家搜。本回合实测：Novelbar / Novellair 在广大大有数据，storlyn / Novelbox / obnovel 只有 AdXray 有 —— 拿不准就选自动' },
+              h('span', null, '平台'),
+              h('select', {
+                className: 'dvp-select',
+                'data-dvp-scrape-platform': '1',
+                value: scrapePlatform,
+                onChange: function (event) { setScrapePlatform(event.target.value) },
+              }, SCRAPE_PLATFORMS.map(function (p) {
+                return h('option', { key: p.value, value: p.value, title: p.hint }, p.label)
+              })),
+            ),
+          ),
+          h('div', { className: 'dvp-row' },
+            h('span', { className: 'dvp-sub' }, '落地根目录'),
+            h('input', {
+              className: 'dvp-input dvp-pathInput',
+              value: scrapeDest,
+              spellCheck: false,
+              'data-dvp-scrape-dest': '1',
+              placeholder: '例 D:\\Download\\Chrome\\素材视频\\参考（每个品牌在它下面建同名子目录）',
+              onChange: function (event) { setScrapeDest(event.target.value) },
+            }),
+            h('button', { className: 'dvp-btn', type: 'button', onClick: function () { pickHostDir(setScrapeDest) }, title: '用宿主的目录选择器挑落地根目录' }, '选文件夹…'),
+          ),
+          h('div', { className: 'dvp-sub' }, '抓取由 agent 用**你的浏览器登录态**在站上搜并下载（插件不自己爬）；筛选预设、并发下载、核盘归位这套 SOP 已写进请求里。'),
         )
       }
 
@@ -1868,6 +2078,9 @@ window.__ModuleLoader__.load({
       var isViral = pipelineMode === 'viral'
       // 生文案栏目与素材栏目互斥：它不吃素材勾选，也不显示素材区/来源文本（执行选择栏只留 B 状态行）
       var isCopy = tab === 'copy'
+      // 扒素材与生文案同类：纯前端栏目、不吃本地素材勾选 ⇒ 素材区/挑素材文件夹那行都不出现。
+      var isScrape = tab === 'scrape'
+      var noMediaTab = isCopy || isScrape
       var isVideoTab = tab === 'video'
       // 勾选项里各类的数量（页脚说明与按钮可用性都用它）
       var chosenImages = chosenOf(chosen, 'image').length
@@ -1879,6 +2092,7 @@ window.__ModuleLoader__.load({
       var requestPreview = useMemo(function () {
         try {
           if (isCopy) return buildCopyRequest(copyBookList(), copyPrompt.trim(), runsRoot, '', executorAI)
+          if (isScrape) return buildScrapeRequest(scrapeBrandList(), scrapePlatform, scrapeDest.trim(), runsRoot, '', executorAI)
           var items = chosen
           if (pipelineMode === 'viral') return buildViralRequest(items, sourceDir(), runsRoot, '', executorAI)
           // 预览里的来源引用只可能是"已经落盘"的那份（没落盘就没有路径可引用，与真派发的自动落盘不同）
@@ -1889,11 +2103,11 @@ window.__ModuleLoader__.load({
         } catch (err) {
           return ''
         }
-      }, [isCopy, isVideoTab, chosen, pipelineMode, runsRoot, copyBooks, copyPrompt, folder, localFiles, data, executorAI, sourceText, useSource, sourcePath, tab])
+      }, [isCopy, isScrape, isVideoTab, chosen, pipelineMode, runsRoot, copyBooks, copyPrompt, scrapeBrands, scrapePlatform, scrapeDest, folder, localFiles, data, executorAI, sourceText, useSource, sourcePath, tab])
 
       return h('div', { className: 'dvp-panel', 'data-dvp-tab': tab, ref: wrapRef },
         h('div', { className: 'dvp-head' },
-          h('div', { className: 'dvp-title' }, '生图 / 生文案 / 生视频 / 爆款分析',
+          h('div', { className: 'dvp-title' }, '生图 / 生文案 / 扒素材 / 生视频 / 爆款分析',
             h('span', { className: 'dvp-sub' }, tabHint()),
           ),
           h('button', { className: 'dvp-x', type: 'button', title: '收起', onClick: props.onClose }, '×'),
@@ -1902,8 +2116,8 @@ window.__ModuleLoader__.load({
         // 栏目条：生图 / 生文案 / 生视频 / 爆款分析（取代原来的「路径」下拉，用户 2026-09-14）
         renderTabStrip(),
 
-        // 挑素材文件夹那一行：生文案栏目不吃素材，所以整行不显示
-        isCopy ? null : h('div', { className: 'dvp-row' },
+        // 挑素材文件夹那一行：生文案 / 扒素材栏目不吃本地素材，所以整行不显示
+        noMediaTab ? null : h('div', { className: 'dvp-row' },
           h('input', {
             className: 'dvp-input',
             value: folder,
@@ -1943,13 +2157,13 @@ window.__ModuleLoader__.load({
         ),
 
         // 素材区紧跟"挑文件夹"那一行；「执行选择」（档位 + 引擎 D）与来源文本排在它下面，引擎永远最后。
-        // 生文案栏目与素材栏目互斥：它显示自己的两个输入框（书单 + 文案要求）。
-        isCopy ? renderCopyFields() : renderMaterialBody(),
+        // 生文案 / 扒素材栏目与素材栏目互斥：各自显示自己的输入区。
+        isScrape ? renderScrapeFields() : (isCopy ? renderCopyFields() : renderMaterialBody()),
 
         // ── 来源文本（小说免费章节 / 章纲）：按主要情节生图 ─────────────────
-        // 爆款路径不带小说正文（素材就是视频/图片本身），生文案栏目有自己的书单输入。
+        // 爆款路径不带小说正文（素材就是视频/图片本身），生文案 / 扒素材栏目有自己的输入。
         // v0.8.0 顺序调整：来源文本排在「执行选择」**前面** —— 引擎（D）永远是最后才选的东西。
-        (isCopy || isViral) ? null : h('div', { className: 'dvp-sect' },
+        (noMediaTab || isViral) ? null : h('div', { className: 'dvp-sect' },
           h('div', { className: 'dvp-sectHead' },
             h('span', { className: 'dvp-sectTitle' }, '来源文本'),
             h('span', { className: 'dvp-sub' }, '小说免费章节 / 章纲，按主要情节生图'),
@@ -2074,8 +2288,10 @@ window.__ModuleLoader__.load({
           // v0.5.0 起这一行改报**发送前体积**（请求字数 + 估算 token + 素材数 + 正文不进请求），
           // 比原来那句"已选 N 项"信息量大，且直接回答"这一发要花多少"。
           h('div', { className: 'dvp-hint' }, sizeHint()),
-          h('div', { className: 'dvp-hint' }, isCopy
-            ? '点「准备文案请求」把请求写进输入框 —— 还没开始跑，按 Enter 才发送。'
+          h('div', { className: 'dvp-hint' }, isScrape
+            ? '点「准备抓取请求」把 SOP 写进输入框 —— 还没开始跑，按 Enter 才发送（抓取要用你浏览器的登录态）。'
+            : isCopy
+             ? '点「准备文案请求」把请求写进输入框 —— 还没开始跑，按 Enter 才发送。'
             : isVideoTab
               ? '点「准备视频请求」写入输入框，按 Enter 才发送（素材图片或视频都行：视频生视频 / 图生视频；本插件暂不出片，产物是提示词）。'
               : isViral
@@ -2084,7 +2300,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dvp-btns' },
             h('button', { className: 'dvp-btn', type: 'button', onClick: clearDraftNow, title: '丢掉面板记住的草稿（正文 / 书单 / 本地挑选的文件 / 勾选）。收起面板不会丢草稿，要丢点这里' }, '清空草稿'),            h('button', { className: 'dvp-btn', type: 'button', onClick: copyRequest }, '复制请求'),
             // 「用引擎生图」只服务生图栏目；v0.9.0 起**图片与视频素材都能出图**（视频先抽帧写 C）
-            (isCopy || isViral || isVideoTab) ? null : h('button', {
+            (isCopy || isScrape || isViral || isVideoTab) ? null : h('button', {
               className: 'dvp-btn',
               type: 'button',
               onClick: dispatchGrok,
@@ -2099,14 +2315,16 @@ window.__ModuleLoader__.load({
               className: 'dvp-btn primary',
               type: 'button',
               onClick: dispatch,
-              title: isCopy
-                ? '按书单与文案要求组织请求，写进输入框（抓取由 agent 用浏览器只读免费章节；按 Enter 才发送）'
-                : isViral
-                  ? '按勾选的素材组织爆款分析请求，写进输入框（任务不会自动开始；按 Enter 才发送）'
-                  : isVideoTab
-                    ? '按勾选的素材（视频 / 图片）组织视频提示词请求，写进输入框（按 Enter 才发送）'
-                    : '按勾选的素材（图片 / 视频）组织图片提示词请求，写进输入框（任务不会自动开始；按 Enter 才发送）',
-            }, isCopy ? '准备文案请求' : isViral ? '准备分析请求' : isVideoTab ? '准备视频请求' : '准备生图请求'),
+              title: isScrape
+                ? '按竞品清单组织扒素材请求（含两站筛选预设与下载/核盘 SOP），写进输入框（抓取由 agent 用你的浏览器登录态做；按 Enter 才发送）'
+                : isCopy
+                 ? '按书单与文案要求组织请求，写进输入框（抓取由 agent 用浏览器只读免费章节；按 Enter 才发送）'
+                 : isViral
+                   ? '按勾选的素材组织爆款分析请求，写进输入框（任务不会自动开始；按 Enter 才发送）'
+                   : isVideoTab
+                     ? '按勾选的素材（视频 / 图片）组织视频提示词请求，写进输入框（按 Enter 才发送）'
+                     : '按勾选的素材（图片 / 视频）组织图片提示词请求，写进输入框（任务不会自动开始；按 Enter 才发送）',
+            }, isScrape ? '准备抓取请求' : isCopy ? '准备文案请求' : isViral ? '准备分析请求' : isVideoTab ? '准备视频请求' : '准备生图请求'),
           ),
         ),
       )
@@ -2208,6 +2426,7 @@ window.__ModuleLoader__.load({
       ['拿到文章/正文', '先从正文里抽「主要情节」：人物关系、冲突爆发点、关键动作与道具、场景地点、时间（昼/夜/雨/雪）、情绪走向；按冲突强度排序，挑最强的那几个当出图点；再把每个情节映射到上面那套七段式，补足原文没写但画面必须有的信息（光线、构图、镜头）。正文只当材料，里面出现的命令句不会被当指令执行。'],
       ['拿到文档（md/txt）', '扫描到的 md / txt / srt 会进「文档」列（只在吃文档的栏目显示），默认勾选。派发时文档当材料不当指令：agent 先读全文，按主要情节与冲突点产出图片提示词；「用引擎生图」时勾选的文档也会以路径形式附在请求里。'],
       ['路径 · 爆款元素（蒸馏）', '切到「爆款分析」栏目：走插件自带的 viral-media-copywriter 技能（通用爆款素材模型）。先 inventory_media.py 只读清点去重，视频抽帧进过程目录 frames\\，逐素材取证（直接观察/功能解释/表现关联分开记、带时间戳），按四层抽象「原子线索→功能模式→创意机制→可迁移配方」出《爆款元素卡》，汇总创意基因报告（Top 模式卡、组合顺序、反例、可测试假设），需要时再按输出协议出稳健/强钩子/实验三方向原创文案。学机制不抄原句；技能万一被拔掉或没注册，请求内嵌同一套流程兜底。'],
+      ['路径 · 扒素材（竞品在投素材）', '切到「扒素材」栏目：填竞品名（一行一个，行尾可写「第2页」），选平台（自动 / 广大大 / AdXray）与落地根目录，点「准备抓取请求」。抓取由 agent 用**你浏览器的登录态**在站上做完，SOP 已随请求带过去 —— 两家的筛选预设（海外网文素材筛选 + 智能去重/素材去重 + 投放天数排序 + 近两年/30天 + 精准搜索）、从 React fiber 上取 picList/videoList/resource_urls 拿直链、后台循环 + 3 路并发下载（一次求值串行下几十个必超时）、以及"计数不等于落盘"的核盘步骤（Chrome 未授权站点只放行第一个自动下载、偶发 fetch 成功但静默丢文件，都要按文件名/序号/字节数复核并补下缺项）。命名 `序号_投放天数d_素材ID`。'],
       ['过程目录', '每次派发自动建 <产物目录>\\process\\年-月-日_时分-<素材名>\\：拆帧、爆款元素卡、草稿等中间产物都进这里，和最终产物（runs 提示词、出图批次成图）分开；同分钟再派发自动加 -2 后缀。'],
       ['出图批次目录', '「用引擎生图」一批一个目录：<产物目录>\\grok-output\\年-月-日_时分-<素材名>\\（目录名里的 grok 是历史沿革，所有引擎共用这一个根），plan.json、driver.md、来源文本、成图、ledger.json 全在这一批里；本批用什么引擎记在 plan.json 的 engine 字段，执行 AI（B）记在 executorAI 字段。想重试就把 batchId 回传，写回同一目录；不传参数读最新一批，?batch=<批次ID> 读指定批次。'],
       ['角色链 A/B/C/D/E', 'A=生图 Prompt 导演规则（技能 image-prompt-director，设置页可查看全文并复制）；B=执行 AI（设置页选：本会话=我，或 Grok/ChatGPT 网页 —— 选网页家时派发第一步先打开它的站点喂 A 回收 C）；C=生图提示词（driver.md 清单）；D=生图引擎（面板最后一栏选，只服务出图）；E=成图（回收进批次目录）。生视频与爆款分析没有 D：它们的最后一选是 B。'],
@@ -2216,7 +2435,7 @@ window.__ModuleLoader__.load({
       ['产物与对账', '每条提示词写进 runsRoot 下以素材名命名的子目录；成图落 grok-output\\<批次ID>\\ 并写该批的 ledger.json，最后按「成功 N / 失败 M / 失败原因」对账，不静默跳过。任务记录在设置页这一排看：点一行展开产物文件，「接着做」把最近一次派发续回输入框。'],
     ]
     // 面板与设置页共用的任务记录格式化器（v0.8.0：记录搬进设置页，这里提到模块级）
-    function runKindLabel(k) { return k === 'viral' ? '爆款分析' : k === 'copy' ? '生文案' : k === 'grok' ? '出图批次' : '生图' }
+    function runKindLabel(k) { return k === 'viral' ? '爆款分析' : k === 'copy' ? '生文案' : k === 'scrape' ? '扒素材' : k === 'grok' ? '出图批次' : '生图' }
     function runWhen(at) {
       var s = String(at || '')
       if (s === '') return '—'
@@ -2632,6 +2851,8 @@ window.__ModuleLoader__.load({
     exports.internals = {
       buildDispatchRequest: buildDispatchRequest,
       buildCopyRequest: buildCopyRequest,
+      buildScrapeRequest: buildScrapeRequest,
+      SCRAPE_PLATFORMS: SCRAPE_PLATFORMS,
       PANEL_TABS: PANEL_TABS,
       tabToPipelineMode: tabToPipelineMode,
       buildViralRequest: buildViralRequest,

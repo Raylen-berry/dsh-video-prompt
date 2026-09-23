@@ -402,8 +402,10 @@ ok('下拉都是 select 元素（原生控件，主题无关）', (panelHtml.mat
 ok('每个选项都渲染成 option', (panelHtml.match(/<option/g) || []).length >= 16, (panelHtml.match(/<option/g) || []).length)
 ok('有扫描层数下拉（默认 4 层）', panelHtml.includes('层数') && panelHtml.includes('只看这一层') && panelHtml.includes('8 层'))
 // v0.8.0：栏目顺序 = 生文案 → 爆款分析 → 生图 → 生视频（用户："标签顺序应该是生文案→爆款分析→生图→生视频"）
+// v0.10.0：栏目顺序 = 生文案 → 扒素材 → 爆款分析 → 生图 → 生视频
+//（用户在 2026-09-17 要求新增「扒素材」并"放在生文案和爆款分析之间"）
 const tabOrder = [...panelHtml.matchAll(/role="tab" class="dvp-tab[^"]*" data-dvp-tab="([a-z]+)"/g)].map((m) => m[1])
-ok('四个栏目按新顺序渲染', tabOrder.join(',') === 'copy,viral,image,video', tabOrder)
+ok('五个栏目按 v0.10.0 顺序渲染', tabOrder.join(',') === 'copy,scrape,viral,image,video', tabOrder)
 ok('默认停在「生图」栏目（主按钮随之是准备生图请求）', panelHtml.includes('data-dvp-tab="image"') && panelHtml.includes('准备生图请求'))
 // v0.8.0：栏目条右侧那份引擎快捷开关**删除**（引擎最后才选 ⇒ 它必须排在素材/来源文本之后）
 ok('栏目条不再挂引擎快捷开关（v0.7.1 补丁已撤）', !panelHtml.includes('data-dvp-engine-top'))
@@ -504,7 +506,7 @@ ok('面板里不再有任务记录区块（渲染函数与 runs 状态都撤了�
 ok('产物文件是按需拉取的（点开那一行才请求 /dvp/runs/files）',
   /function toggleRun\(run\)/.test(source) && /\/dvp\/runs\/files\?dir=/.test(source) && /if \(filesOf\[id\]\) return/.test(source))
 ok('「接着做 / 请求给 AI」读过程目录的 request.md（原请求复放）', /request\.md/.test(source) && /function continueLastRun/.test(source) && /function copyLastRequest/.test(source))
-ok('四个派发构建器都要求把请求原文存进 request.md', (source.match(/存档要求：派发前把/g) || []).length === 4, (source.match(/存档要求：派发前把/g) || []).length)
+ok('五个派发构建器都要求把请求原文存进 request.md', (source.match(/存档要求：派发前把/g) || []).length === 5, (source.match(/存档要求：派发前把/g) || []).length)
 ok('摘要一次拉完且带刷新入口', /function loadRuns\(\)/.test(source) && /onClick: loadRuns/.test(source))
 // v0.4.0：素材行不再显示文件大小（用户 2026-09-14：名称/大小/时间三样里，大小没人看还占宽）
 ok('素材行不再推入文件大小', !/item\.bytes\) dim\.push\(formatBytes/.test(source) && !/dim\.push\(formatBytes/.test(source))
@@ -994,10 +996,31 @@ console.log('\n— 面板草稿（内存，不写磁盘）—')
   ok('生文案写明产出与过程目录', copyReq.includes('过程目录') && copyReq.includes('D:/runs/process/x') && copyReq.includes('适用投放位'))
   ok('提示词留空时不写"文案要求"段（技能默认口径兜底）',
     !it.buildCopyRequest(['1'], '', '', '').includes('文案要求（用户给的提示词'))
-  ok('栏目 ⇒ 宿主状态：生图/生视频=prompt，爆款分析=viral，生文案=不写（null）',
+  ok('栏目 ⇒ 宿主状态：生图/生视频=prompt，爆款分析=viral，生文案与扒素材=不写（null）',
     it.tabToPipelineMode('image') === 'prompt' && it.tabToPipelineMode('video') === 'prompt'
-    && it.tabToPipelineMode('viral') === 'viral' && it.tabToPipelineMode('copy') === null)
-  ok('四个栏目 id 按 v0.8.0 顺序', it.PANEL_TABS.map((x) => x.id).join(',') === 'copy,viral,image,video')
+    && it.tabToPipelineMode('viral') === 'viral' && it.tabToPipelineMode('copy') === null
+    && it.tabToPipelineMode('scrape') === null)
+  ok('五个栏目 id 按 v0.10.0 顺序（扒素材插在生文案与爆款分析之间）', it.PANEL_TABS.map((x) => x.id).join(',') === 'copy,scrape,viral,image,video')
+  ok('扒素材栏目不吃本地素材（kinds 为空，与生文案同形）', it.tabKinds('scrape').join(',') === '')
+  // ── 扒素材栏目（v0.10.0）：抓取 SOP 是否真的随请求带过去 ──────────────────
+  const scrapeReq = it.buildScrapeRequest([{ name: 'storlyn', pages: [2] }, { name: 'Novelbox', pages: [1, 2] }], 'auto', 'D:/Download/参考', 'D:/runs', 'D:/runs/process/s1')
+  ok('扒素材请求列出品牌与各自页码', scrapeReq.includes('storlyn — 第 2 页') && scrapeReq.includes('Novelbox — 第 1、2 页'))
+  ok('扒素材默认带 B=self 行', scrapeReq.includes('执行 AI（B）：本会话'))
+  ok('扒素材的 B 行说的是去抓材料，不是"产出 C"（不产提示词的栏目不套用图口径）',
+    scrapeReq.includes('按下面的 SOP 抓取') && !scrapeReq.includes('产出 C'))
+  ok('扒素材写明两家筛选预设', scrapeReq.includes('海外网文素材筛选') && scrapeReq.includes('智能去重') && scrapeReq.includes('投放天数') && scrapeReq.includes('近两年'))
+  ok('扒素材提醒 AdXray 预设会清掉关键词', scrapeReq.includes('把关键词一起清掉'))
+  ok('扒素材给出取直链的数据路径（fiber / picList / resource_urls）', scrapeReq.includes('creative_list') && scrapeReq.includes('picList') && scrapeReq.includes('resource_urls'))
+  ok('扒素材禁止一次求值串行下几十个（改后台循环 + 轮询）', scrapeReq.includes('串行下几十个必然超时') && scrapeReq.includes('window.__DL'))
+  ok('扒素材要求并发下载', scrapeReq.includes('并发 3 路'))
+  ok('扒素材核盘：计数不等于落盘 + Chrome 只放行第一个自动下载', scrapeReq.includes('不能只信计数') && scrapeReq.includes('始终允许该站点下载多个文件'))
+  ok('扒素材固定命名口径 序号_天数_素材ID', scrapeReq.includes('序号_投放天数d_素材ID'))
+  ok('扒素材写明本机 TLS 直连不可用（只能走浏览器）', scrapeReq.includes('SEC_E_NO_CREDENTIALS') && scrapeReq.includes('只能走浏览器下载'))
+  ok('扒素材要求抽帧验收且点明没有 ffmpeg', scrapeReq.includes('没装 ffmpeg') && scrapeReq.includes('loadeddata'))
+  ok('扒素材要求逐品牌对账并允许"没搜到"跳过', scrapeReq.includes('没搜到') && scrapeReq.includes('不要拿近似品牌凑数'))
+  ok('扒素材落地根目录留空 ⇒ 声明改用 Chrome 当前下载目录并事后归位', it.buildScrapeRequest([{ name: 'a', pages: [1] }], 'adxray', '', '', '').includes('用 Chrome 当前下载目录'))
+  ok('扒素材带根目录时写出 <根目录>\\<品牌名> 口径并带上根目录值', scrapeReq.includes('落地目录：<根目录>\\<品牌名>') && scrapeReq.includes('根目录：D:/Download/参考'))
+  ok('扒素材平台选项三家齐全', it.SCRAPE_PLATFORMS.map((p) => p.value).join(',') === 'auto,guangdada,adxray')
   // 重扫不该把用户改过的勾选冲成"全勾"：草稿里记过的按草稿，新冒出来的按默认勾上
   const merged = it.mergeSelection(['D:/m/a.png', 'D:/m/b.png', 'D:/m/new.png'], { 'D:/m/a.png': false, 'D:/m/b.png': true })
   ok('重扫后：用户取消过的仍未勾选', merged['D:/m/a.png'] === false)

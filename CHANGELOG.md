@@ -1,5 +1,39 @@
 # 变更记录
 
+## 0.10.0 — 2026-09-17 · 新增「扒素材」栏目：把竞品在投素材的抓取 SOP 嵌进面板
+
+**需求原话**（用户）：
+
+> "这轮的操作嵌入生图插件里，新增栏目"扒素材"，放在生文案和爆款分析之间，然后我这回合要求的操作可以记录下来嵌入UI里"
+
+**这一版把什么固化了**：2026-09-17 那一轮在**广大大**（Novelbar / Novellair）与 **AdXray**（storlyn / Novelbox / obnovel）
+上跑通的竞品素材抓取流程 —— 包括三家才踩得出来的坑。做法与「生文案」同形：**面板只准备请求，抓取由 agent 用
+用户的浏览器登录态执行**（插件不自己爬、不联网）。
+
+- `PANEL_TABS` 插进 `{ id: 'scrape', label: '扒素材', kinds: [] }`，位置在 `copy` 与 `viral` 之间 ⇒
+  顺序变成 **生文案 → 扒素材 → 爆款分析 → 生图 → 生视频**。与生文案一样是**纯前端栏目**：
+  `tabToPipelineMode('scrape') === null`（宿主不认识这个值，写了会被 sanitize），`tabKinds` 为空 ⇒ 不渲染素材列。
+- 三个新输入（都进内存草稿，收起面板不丢）：竞品清单 textarea（一行一个，行尾可写「第2页」「:1-2」「、」枚举，
+  默认第 1 页）、平台 select（自动 / 广大大 / AdXray）、落地根目录（带宿主目录选择器按钮）。
+- `buildScrapeRequest(brands, platform, destRoot, runsRoot, processDir, executor)` 把 SOP 逐条写进请求：
+  两家的筛选预设、**AdXray 那个预设会连关键词一起清掉**所以必须补输、从 React fiber 取
+  `creative_list` / `items` 里的 `resource_urls` / `picList` / `videoList` 拿直链、翻页后必须比对首条 ID 防假死、
+  **一次 browser_eval 串行下几十个必超时** ⇒ 改后台循环 + `window.__DL` 轮询 + 3 路并发、
+  **计数不等于落盘** ⇒ 按文件名/序号/字节数核盘并补下缺项、Chrome 未授权站点只放行第一个自动下载、
+  命名 `序号_投放天数d_素材ID`、本机 PowerShell/curl 直连 CDN 一律 TLS 失败只能走浏览器、
+  没装 ffmpeg 就用临时 html `<video>` 真解码抽查并核对时长角标、最后逐品牌对账且允许「没搜到」跳过。
+- 接线：`dispatch()` / `copyRequest()` / `requestPreview` / `sizeHint()`（报「竞品 N 个 · 共 M 页」）/
+  页脚提示与主按钮（本栏是「准备抓取请求」）；`noMediaTab = isCopy || isScrape` 统一接管"不吃素材"的两栏；
+  「用引擎生图」与「记住出图选择」在本栏不出现；标题行加「扒素材」；`runKindLabel` 认 `scrape`；
+  `HOWTO_STEPS` 新增「路径 · 扒素材（竞品在投素材）」一条（设置页与测试读同一份）。
+- 顺手修一处编辑事故：替换「用引擎生图」那行条件时误删了该按钮的 `className/type/onClick`，已复原。
+
+**验证**：`selfcheck` 383 ⇒ **400 项**（新增 17 条：栏目顺序与 scrape 不吃素材、页码解析出的请求文本、
+两家预设文字、预设清关键词提醒、fiber 取链路径、超时与并发口径、核盘与 Chrome 授权、命名规则、
+TLS 限制、抽帧验收、对账与"没搜到"、平台三选项、根目录留空/给值两种落地写法）；
+`run-all` 四套全绿（251 + 18 + 227 + 400）；`servable/client.js` 已 `sync-servable` 同步（sha256 一致）。
+
+
 ## 0.9.0 — 2026-09-17 · 素材 × 产物两两交互，四条路径都通（图生图 / 图生视频 / 视频生图 / 视频生视频）
 
 **需求原话**（用户）：
