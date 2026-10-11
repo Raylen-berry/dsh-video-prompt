@@ -1,7 +1,7 @@
 {
   "name": "dsh-video-prompt",
   "version": "0.10.0",
-  "description": "视频/图片提示词流水线：对话框旁的图片、视频提示词模式入口，素材（图片/视频）与产物（图/视频）两两交互共四条路径（图生图 · 图生视频 · 视频生图 · 视频生视频），角色链 A→B→C→D→E 可选（执行 AI + 生图引擎），另有「生文案」与「扒素材」两个抓取派发栏目（竞品在投素材 / 书免费章节，执行都交给 agent），并注册 video-prompt-pipeline / image-prompt-director 等 7 个技能包。",
+  "description": "DSH Desktop 创作助手：整理图片、视频与文本素材，准备文案、素材抓取、爆款分析、生图与视频提示词任务。",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -33,7 +33,9 @@
     "client.js",
     "skills",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "docs",
+    "CHANGELOG.md"
   ],
   "dsh": {
     "bundle": {
